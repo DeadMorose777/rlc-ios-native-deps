@@ -20,6 +20,14 @@ if [[ ! -x "$FLANG" ]]; then
   exit 1
 fi
 
+patch_flang_rt_for_ios() {
+  local execute_cpp="$LLVM_SRC/flang-rt/lib/runtime/execute.cpp"
+
+  if [[ -f "$execute_cpp" ]]; then
+    perl -0pi -e 's/std::system\(newCmd\)/-1/g' "$execute_cpp"
+  fi
+}
+
 build_one_runtime() {
   local name="$1"
   local sdk="$2"
@@ -143,6 +151,8 @@ EOF
     -name 'libFortranDecimal.a' \
   \) -print | sort
 }
+
+patch_flang_rt_for_ios
 
 build_one_runtime \
   "ios-arm64" \
