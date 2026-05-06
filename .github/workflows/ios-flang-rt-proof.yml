@@ -1,4 +1,4 @@
-﻿name: iOS Flang-RT Proof
+name: iOS Flang-RT Proof
 
 on:
   workflow_dispatch:
@@ -44,11 +44,41 @@ jobs:
           cmake --version
           ninja --version
 
+      - name: Restore host Flang cache
+        id: host-flang-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/src
+            ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/build-host
+            ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/install-host
+          key: rlc-ios-host-flang-${{ runner.os }}-${{ runner.arch }}-${{ env.LLVM_TAG }}-${{ hashFiles('scripts/ios-native/build_llvm_host_flang.sh') }}-v1
+
       - name: Build host LLVM Flang
+        if: steps.host-flang-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euxo pipefail
           bash scripts/ios-native/build_llvm_host_flang.sh
+
+      - name: Verify host LLVM Flang
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -d "${NATIVE_ROOT}/llvm-${LLVM_TAG}/src/.git"
+          test -d "${NATIVE_ROOT}/llvm-${LLVM_TAG}/build-host"
+          test -x "${NATIVE_ROOT}/llvm-${LLVM_TAG}/install-host/bin/flang"
+          "${NATIVE_ROOT}/llvm-${LLVM_TAG}/install-host/bin/flang" --version
+
+      - name: Save host Flang cache
+        if: steps.host-flang-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/src
+            ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/build-host
+            ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/install-host
+          key: ${{ steps.host-flang-cache.outputs.cache-primary-key }}
 
       - name: Build iOS Flang runtimes
         shell: bash
