@@ -111,7 +111,6 @@ EOF
   "$FLANG" \
     -target "$target" \
     -isysroot "$sysroot" \
-    "$min_flag" \
     -fPIC \
     -c "$out_dir/flang_rt_probe.f90" \
     -o "$out_dir/flang_rt_probe.o"
