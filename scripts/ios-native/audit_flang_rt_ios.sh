@@ -87,9 +87,8 @@ audit_one() {
   done < "$out_dir/runtime-libs.txt"
 
   cat > "$out_dir/flang_rt_probe.f90" <<'EOF'
-subroutine flang_rt_probe(out) bind(C)
-  use iso_c_binding
-  integer(c_int), intent(out) :: out
+subroutine flang_rt_probe(out) bind(C, name="flang_rt_probe")
+  integer(4), intent(out) :: out
   character(len=8) :: s
   character(len=:), allocatable :: a
   s = adjustl("  ok")
