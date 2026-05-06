@@ -1,0 +1,110 @@
+﻿name: iOS Flang-RT Proof
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  flang-rt-proof:
+    name: Build iOS Flang runtime static libs
+    runs-on: macos-latest
+    timeout-minutes: 360
+
+    env:
+      LLVM_TAG: llvmorg-22.1.5
+      IPHONEOS_DEPLOYMENT_TARGET: "13.0"
+      NATIVE_ROOT: /tmp/rlc-ios-flang-rt-proof/native
+      AUDIT_OUT: /tmp/rlc-ios-flang-rt-proof/audit
+      LLVM_BUILD_JOBS: "3"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Environment
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sw_vers
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          xcrun --sdk iphonesimulator --show-sdk-path
+          df -h
+          sysctl -n hw.ncpu
+          cmake --version || true
+          ninja --version || true
+
+      - name: Install build tools
+        shell: bash
+        run: |
+          set -euxo pipefail
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install cmake ninja || true
+          cmake --version
+          ninja --version
+
+      - name: Build host LLVM Flang
+        shell: bash
+        run: |
+          set -euxo pipefail
+          bash scripts/ios-native/build_llvm_host_flang.sh
+
+      - name: Build iOS Flang runtimes
+        shell: bash
+        run: |
+          set -euxo pipefail
+          bash scripts/ios-native/build_flang_rt_ios.sh
+
+      - name: Audit iOS Flang runtimes
+        shell: bash
+        run: |
+          set -euxo pipefail
+          bash scripts/ios-native/audit_flang_rt_ios.sh
+
+      - name: Package proof artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          artifact="${RUNNER_TEMP}/rlc-ios-flang-rt-proof/artifact"
+          mkdir -p "$artifact"
+          if [[ -d "${NATIVE_ROOT}/llvm-${LLVM_TAG}" ]]; then
+            find "${NATIVE_ROOT}/llvm-${LLVM_TAG}" \
+              -type f \
+              \( -name 'libflang_rt*.a' -o -name 'libFortranRuntime.a' -o -name 'libFortranDecimal.a' \) \
+              -print | sort > "$artifact/runtime-libs.txt"
+            for slice in ios-arm64 ios-arm64-simulator; do
+              slice_prefix="${NATIVE_ROOT}/llvm-${LLVM_TAG}/install-flangrt-${slice}"
+              slice_out="$artifact/${slice}/lib"
+              mkdir -p "$slice_out"
+              if [[ -d "$slice_prefix" ]]; then
+                find "$slice_prefix" \
+                  -type f \
+                  \( -name 'libflang_rt*.a' -o -name 'libFortranRuntime.a' -o -name 'libFortranDecimal.a' \) \
+                  -print | sort | while IFS= read -r lib; do
+                    cp "$lib" "$slice_out/"
+                  done
+              fi
+            done
+          fi
+          if [[ -d "$AUDIT_OUT" ]]; then
+            cp -R "$AUDIT_OUT" "$artifact/audit"
+            find "$artifact/audit" -type f -name '*.dylib' -delete
+          fi
+          cat > "$artifact/manifest.json" <<EOF
+          {
+            "llvm_tag": "${LLVM_TAG}",
+            "iphoneos_deployment_target": "${IPHONEOS_DEPLOYMENT_TARGET}",
+            "native_root": "${NATIVE_ROOT}",
+            "audit_out": "${AUDIT_OUT}"
+          }
+          EOF
+
+      - name: Upload Flang-RT proof artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-flang-rt-proof-output
+          path: ${{ runner.temp }}/rlc-ios-flang-rt-proof/artifact
+          retention-days: 1
