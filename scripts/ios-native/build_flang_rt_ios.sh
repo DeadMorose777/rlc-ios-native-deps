@@ -12,8 +12,8 @@ LLVM_HOST_BUILD="$LLVM_ROOT/build-host"
 LLVM_HOST_PREFIX="$LLVM_ROOT/install-host"
 
 FLANG="$LLVM_HOST_PREFIX/bin/flang"
-CLANG="$(xcrun --find clang)"
-CLANGXX="$(xcrun --find clang++)"
+REAL_CLANG="$(xcrun --find clang)"
+REAL_CLANGXX="$(xcrun --find clang++)"
 
 if [[ ! -x "$FLANG" ]]; then
   echo "Missing host flang at $FLANG. Run scripts/ios-native/build_llvm_host_flang.sh first." >&2
@@ -31,15 +31,75 @@ build_one_runtime() {
   local ranlib
   local build
   local prefix
+  local wrapper_dir
+  local cc_wrapper
+  local cxx_wrapper
+  local fc_wrapper
 
   sysroot="$(xcrun --sdk "$sdk" --show-sdk-path)"
   ar="$(xcrun --sdk "$sdk" --find ar)"
   ranlib="$(xcrun --sdk "$sdk" --find ranlib)"
   build="$LLVM_ROOT/build-flangrt-$name"
   prefix="$LLVM_ROOT/install-flangrt-$name"
+  wrapper_dir="$LLVM_ROOT/compiler-wrappers-$name"
+  cc_wrapper="$wrapper_dir/clang-wrapper.sh"
+  cxx_wrapper="$wrapper_dir/clangxx-wrapper.sh"
+  fc_wrapper="$wrapper_dir/flang-wrapper.sh"
 
   rm -rf "$build"
-  mkdir -p "$build" "$prefix"
+  mkdir -p "$build" "$prefix" "$wrapper_dir"
+
+  export RLC_REAL_CLANG="$REAL_CLANG"
+  export RLC_REAL_CLANGXX="$REAL_CLANGXX"
+  export RLC_REAL_FLANG="$FLANG"
+
+  cat > "$cc_wrapper" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    -mmacosx-version-min=*) ;;
+    *) args+=("$arg") ;;
+  esac
+done
+exec "$RLC_REAL_CLANG" "${args[@]}"
+EOF
+
+  cat > "$cxx_wrapper" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    -mmacosx-version-min=*) ;;
+    *) args+=("$arg") ;;
+  esac
+done
+exec "$RLC_REAL_CLANGXX" "${args[@]}"
+EOF
+
+  cat > "$fc_wrapper" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+args=()
+skip_next=0
+for arg in "$@"; do
+  if [[ "$skip_next" == 1 ]]; then
+    skip_next=0
+    continue
+  fi
+
+  case "$arg" in
+    -mmacosx-version-min=*|-miphoneos-version-min=*|-mios-simulator-version-min=*) ;;
+    -arch) skip_next=1 ;;
+    *) args+=("$arg") ;;
+  esac
+done
+exec "$RLC_REAL_FLANG" "${args[@]}"
+EOF
+
+  chmod +x "$cc_wrapper" "$cxx_wrapper" "$fc_wrapper"
 
   cmake -S "$LLVM_SRC/runtimes" -B "$build" -G Ninja \
     -DLLVM_BINARY_DIR="$LLVM_HOST_BUILD" \
@@ -53,15 +113,15 @@ build_one_runtime() {
     -DCMAKE_OSX_ARCHITECTURES=arm64 \
     -DCMAKE_OSX_DEPLOYMENT_TARGET="$IPHONEOS_DEPLOYMENT_TARGET" \
     -DCMAKE_SYSROOT="$sysroot" \
-    -DCMAKE_C_COMPILER="$CLANG" \
-    -DCMAKE_CXX_COMPILER="$CLANGXX" \
-    -DCMAKE_Fortran_COMPILER="$FLANG" \
+    -DCMAKE_C_COMPILER="$cc_wrapper" \
+    -DCMAKE_CXX_COMPILER="$cxx_wrapper" \
+    -DCMAKE_Fortran_COMPILER="$fc_wrapper" \
     -DCMAKE_C_COMPILER_TARGET="$target" \
     -DCMAKE_CXX_COMPILER_TARGET="$target" \
     -DCMAKE_Fortran_COMPILER_TARGET="$target" \
     -DCMAKE_C_FLAGS="-target $target -isysroot $sysroot $min_flag -fPIC -O2" \
     -DCMAKE_CXX_FLAGS="-target $target -isysroot $sysroot $min_flag -fPIC -O2 -stdlib=libc++" \
-    -DCMAKE_Fortran_FLAGS="-target $target -isysroot $sysroot $min_flag -fPIC -O2" \
+    -DCMAKE_Fortran_FLAGS="-target $target -isysroot $sysroot -fPIC -O2" \
     -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
     -DCMAKE_C_COMPILER_WORKS=YES \
     -DCMAKE_CXX_COMPILER_WORKS=YES \
