@@ -53,9 +53,22 @@ jobs:
             ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/build-host
             ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/install-host
           key: rlc-ios-host-flang-${{ runner.os }}-${{ runner.arch }}-${{ env.LLVM_TAG }}-${{ hashFiles('scripts/ios-native/build_llvm_host_flang.sh') }}-v1
+          restore-keys: |
+            rlc-ios-host-flang-${{ runner.os }}-${{ runner.arch }}-${{ env.LLVM_TAG }}-
+
+      - name: Check restored host Flang
+        id: restored-host-flang
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if [[ -x "${NATIVE_ROOT}/llvm-${LLVM_TAG}/install-host/bin/flang" ]]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build host LLVM Flang
-        if: steps.host-flang-cache.outputs.cache-hit != 'true'
+        if: steps.restored-host-flang.outputs.present != 'true'
         shell: bash
         run: |
           set -euxo pipefail
@@ -71,7 +84,7 @@ jobs:
           "${NATIVE_ROOT}/llvm-${LLVM_TAG}/install-host/bin/flang" --version
 
       - name: Save host Flang cache
-        if: steps.host-flang-cache.outputs.cache-hit != 'true'
+        if: steps.restored-host-flang.outputs.present != 'true'
         uses: actions/cache/save@v4
         with:
           path: |
