@@ -588,9 +588,11 @@ jobs:
               exit 1
             fi
 
-            xcrun --sdk "$sdk" nm -g "$deps_dir/lib/libipopt.a" | tee "$deps_dir/logs/libipopt-nm.txt"
+            xcrun --sdk "$sdk" nm -g "$deps_dir/lib/libipopt.a" \
+              > "$deps_dir/logs/libipopt-nm.txt" || true
             grep '_CreateIpoptProblem' "$deps_dir/logs/libipopt-nm.txt"
-            xcrun --sdk "$sdk" nm -g "$deps_dir/lib/libdmumps.a" | tee "$deps_dir/logs/libdmumps-nm.txt"
+            xcrun --sdk "$sdk" nm -g "$deps_dir/lib/libdmumps.a" \
+              > "$deps_dir/logs/libdmumps-nm.txt" || true
             grep '_dmumps_c' "$deps_dir/logs/libdmumps-nm.txt"
 
             while IFS= read -r lib; do
