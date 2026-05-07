@@ -277,7 +277,7 @@ jobs:
           C_TARGET = -target ${target_triple} -isysroot \$(shell xcrun --sdk ${sdk} --show-sdk-path) ${min_flag}=${min_value}
           F_TARGET = -target ${target_triple} -isysroot \$(shell xcrun --sdk ${sdk} --show-sdk-path)
 
-          OPTC = \$(C_TARGET) -O2 -fPIC -I. -I\$(topdir)/include \$(IPORD) \$(ORDERINGSC)
+          OPTC = \$(C_TARGET) -O2 -fPIC \$(CDEFS) -I. -I\$(topdir)/include \$(IPORD) \$(ORDERINGSC)
           FLANG_RTTI_FLAGS = -mmlir -skip-external-rtti-definition
           OPTF = \$(F_TARGET) -O0 -fPIC \$(FLANG_RTTI_FLAGS) -DAVOID_MPI_IN_PLACE -I${build_dir}/rlc_flang_modules -I. -I\$(topdir)/include \$(ORDERINGSF)
           OPTL = \$(C_TARGET)
@@ -287,7 +287,7 @@ jobs:
           LIBOTHERS =
           LIBS = \$(LIBPAR) \$(LORDERINGS) \$(LIBBLAS) \$(LIBOTHERS)
 
-          CDEFS =
+          CDEFS = -DAdd_
           LMETISDIR =
           IMETIS =
           LMETIS =
