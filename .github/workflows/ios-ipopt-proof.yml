@@ -1,0 +1,540 @@
+name: iOS IPOPT Proof
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ipopt-proof:
+    name: Build IPOPT static libs for iOS
+    runs-on: macos-latest
+    timeout-minutes: 360
+
+    env:
+      LLVM_TAG: llvmorg-22.1.5
+      IPHONEOS_DEPLOYMENT_TARGET: "13.0"
+      NATIVE_ROOT: /tmp/rlc-ios-ipopt-proof/native
+      LLVM_BUILD_JOBS: "3"
+      IPOPT_VERSION: "3.14.17"
+      IPOPT_TARBALL: "coinor-ipopt_3.14.17.orig.tar.gz"
+      IPOPT_SHA256: "33b397a9b07e0e14c223214da68b47529f687d87743e627ac05ca118c690e133"
+      IPOPT_URL: "https://deb.debian.org/debian/pool/main/c/coinor-ipopt/coinor-ipopt_3.14.17.orig.tar.gz"
+      MUMPS_VERSION: "5.7.3"
+      MUMPS_TARBALL: "mumps_5.7.3.orig.tar.gz"
+      MUMPS_SHA256: "84a47f7c4231b9efdf4d4f631a2cae2bdd9adeaabc088261d15af040143ed112"
+      MUMPS_URL: "https://deb.debian.org/debian/pool/main/m/mumps/mumps_5.7.3.orig.tar.gz"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Environment
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sw_vers
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          xcrun --sdk iphonesimulator --show-sdk-path
+          df -h
+          sysctl -n hw.ncpu
+          cmake --version || true
+          ninja --version || true
+
+      - name: Install native build tools
+        shell: bash
+        run: |
+          set -euxo pipefail
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install cmake ninja pkgconf || true
+          cmake --version
+          ninja --version
+          pkg-config --version
+
+      - name: Restore host Flang cache
+        id: host-flang-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/src
+            ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/build-host
+            ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/install-host
+          key: rlc-ios-host-flang-${{ runner.os }}-${{ runner.arch }}-${{ env.LLVM_TAG }}-${{ hashFiles('scripts/ios-native/build_llvm_host_flang.sh') }}-v1
+
+      - name: Build host LLVM Flang
+        if: steps.host-flang-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          bash scripts/ios-native/build_llvm_host_flang.sh
+
+      - name: Verify host LLVM Flang
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -d "${NATIVE_ROOT}/llvm-${LLVM_TAG}/src/.git"
+          test -d "${NATIVE_ROOT}/llvm-${LLVM_TAG}/build-host"
+          test -x "${NATIVE_ROOT}/llvm-${LLVM_TAG}/install-host/bin/flang"
+          "${NATIVE_ROOT}/llvm-${LLVM_TAG}/install-host/bin/flang" --version
+
+      - name: Save host Flang cache
+        if: steps.host-flang-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/src
+            ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/build-host
+            ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/install-host
+          key: ${{ steps.host-flang-cache.outputs.cache-primary-key }}
+
+      - name: Build iOS Flang runtimes
+        shell: bash
+        run: |
+          set -euxo pipefail
+          bash scripts/ios-native/build_flang_rt_ios.sh
+
+      - name: Download sources
+        shell: bash
+        run: |
+          set -euxo pipefail
+          work="$RUNNER_TEMP/rlc-ios-ipopt-proof"
+          mkdir -p "$work/src" "$work/artifacts"
+          curl -L "$MUMPS_URL" -o "$work/$MUMPS_TARBALL"
+          echo "${MUMPS_SHA256}  $work/$MUMPS_TARBALL" | shasum -a 256 -c -
+          tar -xzf "$work/$MUMPS_TARBALL" -C "$work/src"
+          curl -L "$IPOPT_URL" -o "$work/$IPOPT_TARBALL"
+          echo "${IPOPT_SHA256}  $work/$IPOPT_TARBALL" | shasum -a 256 -c -
+          tar -xzf "$work/$IPOPT_TARBALL" -C "$work/src"
+          find "$work/src" -maxdepth 2 -type d | sort
+
+      - name: Build MUMPS static dependencies
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          work="$RUNNER_TEMP/rlc-ios-ipopt-proof"
+          llvm_root="${NATIVE_ROOT}/llvm-${LLVM_TAG}"
+          flang="$llvm_root/install-host/bin/flang"
+          src_root="$(find "$work/src" -maxdepth 1 -type d -name 'MUMPS_*' | head -n 1)"
+
+          if [[ -z "$src_root" ]]; then
+            echo "::error::MUMPS source directory not found."
+            find "$work/src" -maxdepth 2 -print
+            exit 1
+          fi
+
+          make_flang_wrapper() {
+            local wrapper="$1"
+            mkdir -p "$(dirname "$wrapper")"
+            cat > "$wrapper" <<EOF
+          #!/usr/bin/env bash
+          set -euo pipefail
+          args=()
+          skip_next=0
+          for arg in "\$@"; do
+            if [[ "\$skip_next" == 1 ]]; then
+              skip_next=0
+              continue
+            fi
+            case "\$arg" in
+              -mmacosx-version-min=*|-miphoneos-version-min=*|-mios-simulator-version-min=*) ;;
+              -arch) skip_next=1 ;;
+              *) args+=("\$arg") ;;
+            esac
+          done
+          exec "$flang" "\${args[@]}"
+          EOF
+            chmod +x "$wrapper"
+          }
+
+          make_inc() {
+            local build_dir="$1"
+            local sdk="$2"
+            local min_flag="$3"
+            local min_value="$4"
+            local target_triple="$5"
+            local fc_wrapper="$6"
+
+            cat > "$build_dir/Makefile.inc" <<EOF
+          PLAT =
+          LIBEXT = .a
+          OUTC = -o
+          OUTF = -o
+
+          LIBSEQNEEDED = libseqneeded
+          INCPAR = -I\$(topdir)/libseq
+          LIBPAR = \$(topdir)/lib/libmpiseq.a
+
+          LPORDDIR = \$(topdir)/PORD/lib/
+          IPORDDIR = \$(topdir)/PORD/include/
+          LPORD = \$(topdir)/lib/libpord.a
+          IPORD = -I\$(IPORDDIR)
+
+          ORDERINGSF = -Dpord
+          ORDERINGSC = \$(ORDERINGSF)
+          LORDERINGS = \$(LPORD)
+          IORDERINGSF =
+          IORDERINGSC =
+
+          empty =
+          space = \$(empty) \$(empty)
+
+          CC = xcrun --sdk ${sdk} clang
+          FC = ${fc_wrapper}
+          FL = xcrun --sdk ${sdk} clang
+          AR = xcrun --sdk ${sdk} ar -rvs\$(space)
+          RANLIB = xcrun --sdk ${sdk} ranlib
+          RM = /bin/rm -f
+
+          C_TARGET = -target ${target_triple} -isysroot \$(shell xcrun --sdk ${sdk} --show-sdk-path) ${min_flag}=${min_value}
+          F_TARGET = -target ${target_triple} -isysroot \$(shell xcrun --sdk ${sdk} --show-sdk-path)
+
+          OPTC = \$(C_TARGET) -O2 -fPIC -I. -I\$(topdir)/include \$(IPORD) \$(ORDERINGSC)
+          OPTF = \$(F_TARGET) -O0 -fPIC -I. -I\$(topdir)/include \$(ORDERINGSF)
+          OPTL = \$(C_TARGET)
+
+          INCS = \$(INCPAR) \$(IPORD)
+          LIBBLAS = -framework Accelerate
+          LIBOTHERS =
+          LIBS = \$(LIBPAR) \$(LORDERINGS) \$(LIBBLAS) \$(LIBOTHERS)
+
+          CDEFS =
+          LMETISDIR =
+          IMETIS =
+          LMETIS =
+          ISCOTCH =
+          LSCOTCH =
+
+          FLFLAGS =
+          F90FLAGS = \$(OPTF)
+          FFLAGS = \$(OPTF)
+          CFLAGS = \$(OPTC)
+          LDFLAGS = \$(OPTL)
+          EOF
+          }
+
+          build_mumps_one() {
+            local name="$1"
+            local sdk="$2"
+            local min_flag="$3"
+            local min_value="$4"
+            local target_triple="$5"
+            local build_dir="$work/build-mumps-${name}"
+            local out_dir="$work/artifacts/mumps/${name}"
+            local fc_wrapper="$work/wrappers/${name}/flang-wrapper.sh"
+
+            echo "::group::mumps ${name}"
+            rm -rf "$build_dir" "$out_dir"
+            mkdir -p "$build_dir" "$out_dir"
+            make_flang_wrapper "$fc_wrapper"
+            (cd "$src_root" && tar -cf - .) | (cd "$build_dir" && tar -xf -)
+            make_inc "$build_dir" "$sdk" "$min_flag" "$min_value" "$target_triple" "$fc_wrapper"
+            (
+              cd "$build_dir"
+              set -ex
+              make clean
+              make libseqneeded
+              make lib/libpord.a
+              make -C src d
+            ) 2>&1 | tee "$out_dir/build.log"
+            build_status="${PIPESTATUS[0]}"
+            cp "$build_dir/Makefile.inc" "$out_dir/Makefile.inc"
+            mkdir -p "$out_dir/include"
+            cp "$build_dir/include/"*.h "$out_dir/include/"
+            cp "$build_dir/libseq/mpi.h" "$out_dir/include/"
+            find "$build_dir/lib" -maxdepth 1 -type f -name '*.a' -print -exec cp {} "$out_dir/" \; || true
+            echo "::endgroup::"
+
+            if [[ "$build_status" -ne 0 ]]; then
+              echo "::error::MUMPS ${name} build failed with status ${build_status}."
+              return "$build_status"
+            fi
+
+            ls -la "$out_dir"
+            xcrun --sdk "$sdk" nm -g "$out_dir/libdmumps.a" | grep _dmumps_c
+          }
+
+          status=0
+          build_mumps_one "ios-arm64" "iphoneos" "-miphoneos-version-min" "13.0" "arm64-apple-ios13.0" || status=1
+          build_mumps_one "ios-arm64-simulator" "iphonesimulator" "-mios-simulator-version-min" "13.0" "arm64-apple-ios13.0-simulator" || status=1
+          exit "$status"
+
+      - name: Build IPOPT static library
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          work="$RUNNER_TEMP/rlc-ios-ipopt-proof"
+          llvm_root="${NATIVE_ROOT}/llvm-${LLVM_TAG}"
+          flang="$llvm_root/install-host/bin/flang"
+          ipopt_src="$(find "$work/src" -maxdepth 1 -type d \( -name 'coinor-ipopt-*' -o -name 'Ipopt-*' \) | head -n 1)"
+
+          if [[ -z "$ipopt_src" ]]; then
+            echo "::error::IPOPT source directory not found."
+            find "$work/src" -maxdepth 2 -print
+            exit 1
+          fi
+
+          make_flang_wrapper() {
+            local wrapper="$1"
+            mkdir -p "$(dirname "$wrapper")"
+            cat > "$wrapper" <<EOF
+          #!/usr/bin/env bash
+          set -euo pipefail
+          args=()
+          skip_next=0
+          for arg in "\$@"; do
+            if [[ "\$skip_next" == 1 ]]; then
+              skip_next=0
+              continue
+            fi
+            case "\$arg" in
+              -mmacosx-version-min=*|-miphoneos-version-min=*|-mios-simulator-version-min=*) ;;
+              -arch) skip_next=1 ;;
+              *) args+=("\$arg") ;;
+            esac
+          done
+          exec "$flang" "\${args[@]}"
+          EOF
+            chmod +x "$wrapper"
+          }
+
+          build_ipopt_one() {
+            local name="$1"
+            local sdk="$2"
+            local min_flag="$3"
+            local min_value="$4"
+            local target_triple="$5"
+            local host="$6"
+            local mumps_dir="$work/artifacts/mumps/${name}"
+            local build_dir="$work/build-ipopt-${name}"
+            local install_dir="$work/artifacts/ipopt/${name}"
+            local fc_wrapper="$work/wrappers/${name}/flang-wrapper.sh"
+            local sdk_path
+            sdk_path="$(xcrun --sdk "$sdk" --show-sdk-path)"
+            make_flang_wrapper "$fc_wrapper"
+
+            echo "::group::ipopt ${name}"
+            rm -rf "$build_dir" "$install_dir"
+            mkdir -p "$build_dir" "$install_dir"
+
+            (
+              cd "$build_dir"
+              export CC="xcrun --sdk ${sdk} clang"
+              export CXX="xcrun --sdk ${sdk} clang++"
+              export F77="$fc_wrapper"
+              export FC="$fc_wrapper"
+              export CFLAGS="-target ${target_triple} -isysroot ${sdk_path} ${min_flag}=${min_value} -O2 -fPIC"
+              export CXXFLAGS="$CFLAGS -stdlib=libc++"
+              export FFLAGS="-target ${target_triple} -isysroot ${sdk_path} -O0 -fPIC"
+              export FCFLAGS="$FFLAGS"
+              export LDFLAGS="-target ${target_triple} -isysroot ${sdk_path} ${min_flag}=${min_value}"
+              export ac_cv_func_malloc_0_nonnull=yes
+              export ac_cv_func_realloc_0_nonnull=yes
+              export coin_cv_f77_mangling='lowercase-underscore'
+              set -ex
+              if ! "$ipopt_src/configure" \
+                --host="$host" \
+                --build="$(sh "$ipopt_src/config.guess")" \
+                --prefix="$install_dir" \
+                --disable-shared \
+                --enable-static \
+                --without-asl \
+                --disable-java \
+                --disable-linear-solver-loader \
+                --with-blas="-framework Accelerate" \
+                --with-lapack="-framework Accelerate" \
+                --with-mumps-cflags="-I${mumps_dir}/include" \
+                --with-mumps-lflags="${mumps_dir}/libdmumps.a ${mumps_dir}/libmumps_common.a ${mumps_dir}/libpord.a ${mumps_dir}/libmpiseq.a"; then
+                cp config.log "$install_dir/config.log" || true
+                exit 1
+              fi
+              cp config.log "$install_dir/config.log" || true
+              make -j2
+              make install
+            ) 2>&1 | tee "$install_dir/build.log"
+            status="${PIPESTATUS[0]}"
+            echo "::endgroup::"
+
+            if [[ "$status" -ne 0 ]]; then
+              echo "::error::IPOPT ${name} build failed with status ${status}."
+              return "$status"
+            fi
+
+            echo "::group::audit ipopt ${name}"
+            find "$install_dir" -maxdepth 4 -type f | sort
+            file "$install_dir/lib/"*.a
+            xcrun --sdk "$sdk" nm -g "$install_dir/lib/libipopt.a" | tee "$install_dir/libipopt-nm.txt"
+            grep -E 'CreateIpoptProblem|GetIpoptVersion' "$install_dir/libipopt-nm.txt"
+            echo "::endgroup::"
+          }
+
+          status=0
+          build_ipopt_one "ios-arm64" "iphoneos" "-miphoneos-version-min" "13.0" "arm64-apple-ios13.0" "arm-apple-darwin" || status=1
+          build_ipopt_one "ios-arm64-simulator" "iphonesimulator" "-mios-simulator-version-min" "13.0" "arm64-apple-ios13.0-simulator" "arm64-apple-darwin" || status=1
+          exit "$status"
+
+      - name: Package and audit reusable native deps
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          work="$RUNNER_TEMP/rlc-ios-ipopt-proof"
+          llvm_root="${NATIVE_ROOT}/llvm-${LLVM_TAG}"
+
+          runtime_libs_for() {
+            local name="$1"
+            find "$llvm_root/install-flangrt-${name}" -type f \( \
+              -name 'libflang_rt.runtime.a' -o \
+              -name 'libflang_rt.quadmath.a' -o \
+              -name 'libFortranRuntime.a' -o \
+              -name 'libFortranDecimal.a' \
+            \) -print | sort
+          }
+
+          package_one() {
+            local name="$1"
+            local sdk="$2"
+            local deps_dir="$work/artifacts/native-deps/${name}"
+            local ipopt_dir="$work/artifacts/ipopt/${name}"
+            local mumps_dir="$work/artifacts/mumps/${name}"
+            local flatten_dir="$work/flatten-ipopt-${name}"
+
+            rm -rf "$deps_dir"
+            mkdir -p "$deps_dir/lib" "$deps_dir/include" "$deps_dir/logs"
+            rm -rf "$flatten_dir"
+            mkdir -p "$flatten_dir"
+            (
+              cd "$flatten_dir"
+              xcrun --sdk "$sdk" ar -x "$ipopt_dir/lib/libipopt.a"
+              find . -maxdepth 1 -type f -name '*.a' -print -delete \
+                > "$deps_dir/logs/libipopt-removed-nested-archives.txt"
+              xcrun --sdk "$sdk" libtool -static -o "$deps_dir/lib/libipopt.a" ./*.o
+            )
+            cp "$ipopt_dir/lib/libsipopt.a" "$deps_dir/lib/" || true
+            cp "$mumps_dir"/lib*.a "$deps_dir/lib/"
+            runtime_libs_for "$name" | while IFS= read -r lib; do
+              cp "$lib" "$deps_dir/lib/"
+            done
+            cp -R "$ipopt_dir/include/coin-or" "$deps_dir/include/"
+            cp "$mumps_dir/include/"*.h "$deps_dir/include/"
+            cp "$ipopt_dir/build.log" "$deps_dir/logs/ipopt-build.log"
+            cp "$ipopt_dir/config.log" "$deps_dir/logs/ipopt-config.log"
+            cp "$mumps_dir/build.log" "$deps_dir/logs/mumps-build.log"
+            cp "$mumps_dir/Makefile.inc" "$deps_dir/logs/mumps-Makefile.inc"
+
+            cat > "$deps_dir/manifest.json" <<EOF
+          {
+            "abi": "${name}",
+            "llvm_tag": "${LLVM_TAG}",
+            "iphoneos_deployment_target": "${IPHONEOS_DEPLOYMENT_TARGET}",
+            "ipopt_version": "${IPOPT_VERSION}",
+            "mumps_version": "${MUMPS_VERSION}",
+            "blas_lapack": "Apple Accelerate",
+            "libraries": [
+              "libipopt.a",
+              "libdmumps.a",
+              "libmumps_common.a",
+              "libpord.a",
+              "libmpiseq.a",
+              "libflang_rt.runtime.a"
+            ]
+          }
+          EOF
+          }
+
+          audit_one() {
+            local name="$1"
+            local sdk="$2"
+            local min_flag="$3"
+            local min_value="$4"
+            local target_triple="$5"
+            local deps_dir="$work/artifacts/native-deps/${name}"
+            local sdk_path
+            local runtime_link_args=()
+            sdk_path="$(xcrun --sdk "$sdk" --show-sdk-path)"
+
+            echo "::group::audit native-deps ${name}"
+            test -f "$deps_dir/lib/libipopt.a"
+            test -f "$deps_dir/lib/libdmumps.a"
+            test -f "$deps_dir/lib/libmumps_common.a"
+            test -f "$deps_dir/lib/libpord.a"
+            test -f "$deps_dir/lib/libmpiseq.a"
+            test -f "$deps_dir/lib/libflang_rt.runtime.a"
+            test -f "$deps_dir/include/coin-or/IpStdCInterface.h"
+            test -f "$deps_dir/include/dmumps_c.h"
+            test -f "$deps_dir/include/mumps_compat.h"
+            test -f "$deps_dir/include/mpi.h"
+
+            if xcrun --sdk "$sdk" ar -t "$deps_dir/lib/libipopt.a" | grep -E '\.a$'; then
+              echo "::error::Nested static archive found inside packaged libipopt.a."
+              exit 1
+            fi
+
+            if find "$deps_dir" -type f \( -name '*.dylib' -o -name '*.so' -o -name '*.dll' \) | grep .; then
+              echo "::error::Forbidden dynamic library found in iOS native deps."
+              exit 1
+            fi
+
+            xcrun --sdk "$sdk" nm -g "$deps_dir/lib/libipopt.a" | tee "$deps_dir/logs/libipopt-nm.txt"
+            grep '_CreateIpoptProblem' "$deps_dir/logs/libipopt-nm.txt"
+            xcrun --sdk "$sdk" nm -g "$deps_dir/lib/libdmumps.a" | tee "$deps_dir/logs/libdmumps-nm.txt"
+            grep '_dmumps_c' "$deps_dir/logs/libdmumps-nm.txt"
+
+            while IFS= read -r lib; do
+              [[ -n "$lib" ]] || continue
+              runtime_link_args+=("-Wl,-force_load,$lib")
+            done < <(find "$deps_dir/lib" -type f -name 'libflang_rt*.a' -print | sort)
+
+            cat > "$deps_dir/ipopt_smoke.c" <<'EOF'
+          #include "IpStdCInterface.h"
+          void *rlc_ipopt_smoke_symbol(void) {
+            return (void *)&CreateIpoptProblem;
+          }
+          EOF
+            xcrun --sdk "$sdk" clang++ \
+              -target "$target_triple" \
+              -isysroot "$sdk_path" \
+              "${min_flag}=${min_value}" \
+              -I"$deps_dir/include/coin-or" \
+              -c "$deps_dir/ipopt_smoke.c" \
+              -o "$deps_dir/ipopt_smoke.o"
+            xcrun --sdk "$sdk" clang++ \
+              -target "$target_triple" \
+              -isysroot "$sdk_path" \
+              "${min_flag}=${min_value}" \
+              -dynamiclib \
+              -Wl,-undefined,error \
+              "$deps_dir/ipopt_smoke.o" \
+              -Wl,-force_load,"$deps_dir/lib/libipopt.a" \
+              -Wl,-force_load,"$deps_dir/lib/libdmumps.a" \
+              -Wl,-force_load,"$deps_dir/lib/libmumps_common.a" \
+              -Wl,-force_load,"$deps_dir/lib/libpord.a" \
+              -Wl,-force_load,"$deps_dir/lib/libmpiseq.a" \
+              "${runtime_link_args[@]}" \
+              -framework Accelerate \
+              -lc++ \
+              -lm \
+              -o "$deps_dir/ipopt_link_smoke.dylib"
+            otool -L "$deps_dir/ipopt_link_smoke.dylib" | tee "$deps_dir/logs/ipopt-link-smoke-otool.txt"
+            if grep -E '/opt/homebrew|libflang|Fortran|LLVM|gfortran' "$deps_dir/logs/ipopt-link-smoke-otool.txt"; then
+              echo "::error::Unexpected non-system dynamic Fortran/LLVM dependency in ${name} smoke binary."
+              exit 1
+            fi
+            rm -f "$deps_dir/ipopt_smoke.c" "$deps_dir/ipopt_smoke.o" "$deps_dir/ipopt_link_smoke.dylib"
+            echo "::endgroup::"
+          }
+
+          package_one "ios-arm64" "iphoneos"
+          package_one "ios-arm64-simulator" "iphonesimulator"
+          audit_one "ios-arm64" "iphoneos" "-miphoneos-version-min" "13.0" "arm64-apple-ios13.0"
+          audit_one "ios-arm64-simulator" "iphonesimulator" "-mios-simulator-version-min" "13.0" "arm64-apple-ios13.0-simulator"
+
+      - name: Upload IPOPT proof artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ipopt-proof-output
+          path: ${{ runner.temp }}/rlc-ios-ipopt-proof/artifacts
+          retention-days: 1
