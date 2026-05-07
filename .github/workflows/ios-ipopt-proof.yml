@@ -619,10 +619,10 @@ jobs:
               -Wl,-undefined,error \
               "$deps_dir/ipopt_smoke.o" \
               -Wl,-force_load,"$deps_dir/lib/libipopt.a" \
-              -Wl,-force_load,"$deps_dir/lib/libdmumps.a" \
-              -Wl,-force_load,"$deps_dir/lib/libmumps_common.a" \
-              -Wl,-force_load,"$deps_dir/lib/libpord.a" \
-              -Wl,-force_load,"$deps_dir/lib/libmpiseq.a" \
+              "$deps_dir/lib/libdmumps.a" \
+              "$deps_dir/lib/libmumps_common.a" \
+              "$deps_dir/lib/libpord.a" \
+              "$deps_dir/lib/libmpiseq.a" \
               "${runtime_link_args[@]}" \
               -framework Accelerate \
               -lc++ \
