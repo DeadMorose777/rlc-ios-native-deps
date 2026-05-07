@@ -15,7 +15,7 @@ jobs:
     env:
       LLVM_TAG: llvmorg-22.1.5
       IPHONEOS_DEPLOYMENT_TARGET: "13.0"
-      NATIVE_ROOT: /tmp/rlc-ios-ipopt-proof/native
+      NATIVE_ROOT: /tmp/rlc-ios-flang-rt-proof/native
       LLVM_BUILD_JOBS: "3"
       IPOPT_VERSION: "3.14.17"
       IPOPT_TARBALL: "coinor-ipopt_3.14.17.orig.tar.gz"
