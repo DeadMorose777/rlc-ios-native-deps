@@ -391,6 +391,16 @@ jobs:
             chmod +x "$wrapper"
           }
 
+          runtime_libs_for() {
+            local name="$1"
+            find "$llvm_root/install-flangrt-${name}" -type f \( \
+              -name 'libflang_rt.runtime.a' -o \
+              -name 'libflang_rt.quadmath.a' -o \
+              -name 'libFortranRuntime.a' -o \
+              -name 'libFortranDecimal.a' \
+            \) -print | sort
+          }
+
           build_ipopt_one() {
             local name="$1"
             local sdk="$2"
@@ -403,8 +413,14 @@ jobs:
             local install_dir="$work/artifacts/ipopt/${name}"
             local fc_wrapper="$work/wrappers/${name}/flang-wrapper.sh"
             local sdk_path
+            local runtime_flibs
             sdk_path="$(xcrun --sdk "$sdk" --show-sdk-path)"
             make_flang_wrapper "$fc_wrapper"
+            runtime_flibs="$(runtime_libs_for "$name" | tr '\n' ' ')"
+            if [[ -z "$runtime_flibs" ]]; then
+              echo "::error::No Flang runtime libraries found for ${name}."
+              return 1
+            fi
 
             echo "::group::ipopt ${name}"
             rm -rf "$build_dir" "$install_dir"
@@ -421,6 +437,10 @@ jobs:
               export FFLAGS="-target ${target_triple} -isysroot ${sdk_path} -O0 -fPIC"
               export FCFLAGS="$FFLAGS"
               export LDFLAGS="-target ${target_triple} -isysroot ${sdk_path} ${min_flag}=${min_value}"
+              export FLIBS="$runtime_flibs"
+              export ac_cv_f77_libs="$runtime_flibs"
+              export ac_cv_f77_dummy_main=none
+              export ac_cv_fortran_dummy_main=none
               export ac_cv_func_malloc_0_nonnull=yes
               export ac_cv_func_realloc_0_nonnull=yes
               export coin_cv_f77_mangling='lowercase-underscore'
