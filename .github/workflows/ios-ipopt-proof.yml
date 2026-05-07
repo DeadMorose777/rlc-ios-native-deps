@@ -204,7 +204,8 @@ jobs:
           F_TARGET = -target ${target_triple} -isysroot \$(shell xcrun --sdk ${sdk} --show-sdk-path)
 
           OPTC = \$(C_TARGET) -O2 -fPIC -I. -I\$(topdir)/include \$(IPORD) \$(ORDERINGSC)
-          OPTF = \$(F_TARGET) -O0 -fPIC -I. -I\$(topdir)/include \$(ORDERINGSF)
+          FLANG_RTTI_FLAGS = -mmlir -skip-external-rtti-definition
+          OPTF = \$(F_TARGET) -O0 -fPIC \$(FLANG_RTTI_FLAGS) -I. -I\$(topdir)/include \$(ORDERINGSF)
           OPTL = \$(C_TARGET)
 
           INCS = \$(INCPAR) \$(IPORD)
