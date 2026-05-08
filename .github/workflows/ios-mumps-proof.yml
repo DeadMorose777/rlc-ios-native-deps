@@ -1,4 +1,4 @@
-﻿name: iOS MUMPS Proof
+name: iOS MUMPS Proof
 
 on:
   workflow_dispatch:
@@ -56,7 +56,7 @@ jobs:
             ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/src
             ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/build-host
             ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/install-host
-          key: rlc-ios-host-flang-${{ runner.os }}-${{ runner.arch }}-${{ env.LLVM_TAG }}-${{ hashFiles('scripts/ios-native/build_llvm_host_flang.sh') }}-v1
+          key: rlc-ios-host-flang-${{ runner.os }}-${{ runner.arch }}-${{ env.LLVM_TAG }}-${{ hashFiles('scripts/ios-native/build_llvm_host_flang.sh') }}-v2
           restore-keys: |
             rlc-ios-host-flang-${{ runner.os }}-${{ runner.arch }}-${{ env.LLVM_TAG }}-
 
@@ -78,17 +78,50 @@ jobs:
           set -euxo pipefail
           bash scripts/ios-native/build_llvm_host_flang.sh
 
+      - name: Ensure host Flang intrinsic modules
+        shell: bash
+        run: |
+          set -euxo pipefail
+          llvm_root="${NATIVE_ROOT}/llvm-${LLVM_TAG}"
+          if [[ ! -f "$llvm_root/install-host/include/flang/iso_c_binding.mod" ]]; then
+            cmake --build "$llvm_root/build-host" --target module_files -j"${LLVM_BUILD_JOBS}"
+            cmake --build "$llvm_root/build-host" --target install-flang-module-interfaces -j"${LLVM_BUILD_JOBS}" || true
+            mkdir -p "$llvm_root/install-host/include/flang"
+            rsync -a "$llvm_root/build-host/include/flang/" "$llvm_root/install-host/include/flang/"
+          fi
+          test -f "$llvm_root/install-host/include/flang/iso_c_binding.mod"
+          test -f "$llvm_root/install-host/include/flang/__fortran_builtins.mod"
+
       - name: Verify host LLVM Flang
         shell: bash
         run: |
           set -euxo pipefail
-          test -d "${NATIVE_ROOT}/llvm-${LLVM_TAG}/src/.git"
-          test -d "${NATIVE_ROOT}/llvm-${LLVM_TAG}/build-host"
-          test -x "${NATIVE_ROOT}/llvm-${LLVM_TAG}/install-host/bin/flang"
-          "${NATIVE_ROOT}/llvm-${LLVM_TAG}/install-host/bin/flang" --version
+          llvm_root="${NATIVE_ROOT}/llvm-${LLVM_TAG}"
+          flang="$llvm_root/install-host/bin/flang"
+          flang_intrinsic_modules="$llvm_root/install-host/include/flang"
+          flang_mods="$llvm_root/install-host/include/flang"
+          test -d "$llvm_root/src/.git"
+          test -d "$llvm_root/build-host"
+          test -x "$flang"
+          test -f "$flang_mods/iso_c_binding.mod"
+          test -f "$flang_mods/__fortran_builtins.mod"
+          "$flang" --version
+          cat > "$RUNNER_TEMP/rlc_iso_probe.f90" <<'EOF'
+          subroutine rlc_iso_probe(p)
+            use, intrinsic :: iso_c_binding, only : c_ptr
+            type(c_ptr) :: p
+          end subroutine rlc_iso_probe
+          EOF
+          "$flang" \
+            -target arm64-apple-ios13.0 \
+            -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" \
+            -fintrinsic-modules-path "$flang_mods" \
+            -c "$RUNNER_TEMP/rlc_iso_probe.f90" \
+            -o "$RUNNER_TEMP/rlc_iso_probe.o"
+          file "$RUNNER_TEMP/rlc_iso_probe.o"
 
       - name: Save host Flang cache
-        if: steps.restored-host-flang.outputs.present != 'true'
+        if: steps.host-flang-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: |
@@ -122,6 +155,7 @@ jobs:
           work="$RUNNER_TEMP/rlc-ios-mumps-proof"
           llvm_root="${NATIVE_ROOT}/llvm-${LLVM_TAG}"
           flang="$llvm_root/install-host/bin/flang"
+          flang_intrinsic_modules="$llvm_root/install-host/include/flang"
           src_root="$(find "$work/src" -maxdepth 1 -type d -name 'MUMPS_*' | head -n 1)"
 
           if [[ -z "$src_root" ]]; then
@@ -149,7 +183,7 @@ jobs:
               *) args+=("\$arg") ;;
             esac
           done
-          exec "$flang" "\${args[@]}"
+          exec "$flang" -fintrinsic-modules-path "$flang_intrinsic_modules" "\${args[@]}"
           EOF
             chmod +x "$wrapper"
           }
@@ -271,8 +305,7 @@ jobs:
           F_TARGET = -target ${target_triple} -isysroot \$(shell xcrun --sdk ${sdk} --show-sdk-path)
 
           OPTC = \$(C_TARGET) -O2 -fPIC \$(CDEFS) -I. -I\$(topdir)/include \$(IPORD) \$(ORDERINGSC)
-          FLANG_RTTI_FLAGS = -mmlir -skip-external-rtti-definition
-          OPTF = \$(F_TARGET) -O0 -fPIC \$(FLANG_RTTI_FLAGS) -DAVOID_MPI_IN_PLACE -I${build_dir}/rlc_flang_modules -I. -I\$(topdir)/include \$(ORDERINGSF)
+          OPTF = \$(F_TARGET) -O2 -fPIC -DAVOID_MPI_IN_PLACE -J${build_dir}/rlc_flang_modules -I${build_dir}/rlc_flang_modules -I. -I\$(topdir)/include \$(ORDERINGSF)
           OPTL = \$(C_TARGET)
 
           INCS = \$(INCPAR) \$(IPORD)
@@ -314,13 +347,16 @@ jobs:
             make_inc "$build_dir" "$sdk" "$min_flag" "$min_value" "$target_triple" "$fc_wrapper"
             (
               cd "$build_dir"
-              set -uxo pipefail
+              set -euxo pipefail
               make clean
               make libseqneeded
-              libseq_status="$?"
-              if [[ "$libseq_status" -ne 0 ]]; then
-                echo "::warning::MUMPS libseqneeded failed with status ${libseq_status}; archiving local OpenMP stub only to expose fake-MPI unresolved symbols in link smoke."
-              fi
+              xcrun --sdk "$sdk" ar -t lib/libmpiseq.a | tee "$out_dir/libmpiseq-ar.txt"
+              grep '^mpi.o$' "$out_dir/libmpiseq-ar.txt"
+              grep '^mpic.o$' "$out_dir/libmpiseq-ar.txt"
+              grep '^elapse.o$' "$out_dir/libmpiseq-ar.txt"
+              xcrun --sdk "$sdk" nm -g lib/libmpiseq.a > "$out_dir/libmpiseq-nm.txt" || true
+              grep '_mpi_allreduce_' "$out_dir/libmpiseq-nm.txt"
+              grep '_mpi_wtime_' "$out_dir/libmpiseq-nm.txt"
               xcrun --sdk "$sdk" ar -rvs lib/libmpiseq.a rlc_flang_modules/omp_lib_stub.o
               xcrun --sdk "$sdk" ranlib lib/libmpiseq.a
               make lib/libpord.a
@@ -462,8 +498,11 @@ jobs:
               otool -L "$deps_dir/dmumps_full_archive_link_smoke.dylib" | tee "$deps_dir/dmumps-full-archive-otool.txt"
             fi
 
-            if [[ "$symbol_status" -ne 0 || "$full_status" -ne 0 ]]; then
-              echo "::error::MUMPS link smoke failed for ${name}: symbol=${symbol_status}, full_archive=${full_status}. See dmumps-*-link.log artifacts."
+            if [[ "$symbol_status" -ne 0 ]]; then
+              echo "::warning::Regular archive extraction MUMPS smoke failed for ${name}; production link uses force_load. See dmumps-symbol-link.log."
+            fi
+            if [[ "$full_status" -ne 0 ]]; then
+              echo "::error::MUMPS force_load link smoke failed for ${name}: symbol=${symbol_status}, full_archive=${full_status}. See dmumps-*-link.log artifacts."
               exit 1
             fi
             echo "::endgroup::"

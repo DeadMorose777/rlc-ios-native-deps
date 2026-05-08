@@ -38,8 +38,14 @@ cmake -S "$LLVM_SRC/llvm" -B "$LLVM_BUILD" -G Ninja \
   -DFLANG_ENABLE_FLANG_RT=OFF
 
 cmake --build "$LLVM_BUILD" --target "$HOST_BUILD_TARGET" -j"$LLVM_BUILD_JOBS"
+cmake --build "$LLVM_BUILD" --target module_files -j"$LLVM_BUILD_JOBS"
+cmake --build "$LLVM_BUILD" --target install-flang-module-interfaces -j"$LLVM_BUILD_JOBS" || true
 
-mkdir -p "$LLVM_PREFIX/bin"
+mkdir -p "$LLVM_PREFIX/bin" "$LLVM_PREFIX/include/flang"
 cp "$LLVM_BUILD/bin/flang" "$LLVM_PREFIX/bin/flang"
+rsync -a "$LLVM_BUILD/include/flang/" "$LLVM_PREFIX/include/flang/"
+
+test -f "$LLVM_PREFIX/include/flang/iso_c_binding.mod"
+test -f "$LLVM_PREFIX/include/flang/__fortran_builtins.mod"
 
 "$LLVM_PREFIX/bin/flang" --version
