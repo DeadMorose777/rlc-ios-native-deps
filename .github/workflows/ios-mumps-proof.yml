@@ -1,0 +1,481 @@
+﻿name: iOS MUMPS Proof
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mumps-proof:
+    name: Build MUMPS static libs for iOS
+    runs-on: macos-latest
+    timeout-minutes: 180
+
+    env:
+      LLVM_TAG: llvmorg-22.1.5
+      IPHONEOS_DEPLOYMENT_TARGET: "13.0"
+      NATIVE_ROOT: /tmp/rlc-ios-flang-rt-proof/native
+      LLVM_BUILD_JOBS: "3"
+      MUMPS_VERSION: "5.7.3"
+      MUMPS_TARBALL: "mumps_5.7.3.orig.tar.gz"
+      MUMPS_SHA256: "84a47f7c4231b9efdf4d4f631a2cae2bdd9adeaabc088261d15af040143ed112"
+      MUMPS_URL: "https://deb.debian.org/debian/pool/main/m/mumps/mumps_5.7.3.orig.tar.gz"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Environment
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sw_vers
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          xcrun --sdk iphonesimulator --show-sdk-path
+          df -h
+          sysctl -n hw.ncpu
+          cmake --version || true
+          ninja --version || true
+
+      - name: Install native build tools
+        shell: bash
+        run: |
+          set -euxo pipefail
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install cmake ninja pkgconf || true
+          cmake --version
+          ninja --version
+          pkg-config --version
+
+      - name: Restore host Flang cache
+        id: host-flang-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/src
+            ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/build-host
+            ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/install-host
+          key: rlc-ios-host-flang-${{ runner.os }}-${{ runner.arch }}-${{ env.LLVM_TAG }}-${{ hashFiles('scripts/ios-native/build_llvm_host_flang.sh') }}-v1
+          restore-keys: |
+            rlc-ios-host-flang-${{ runner.os }}-${{ runner.arch }}-${{ env.LLVM_TAG }}-
+
+      - name: Check restored host Flang
+        id: restored-host-flang
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if [[ -x "${NATIVE_ROOT}/llvm-${LLVM_TAG}/install-host/bin/flang" ]]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build host LLVM Flang
+        if: steps.restored-host-flang.outputs.present != 'true'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          bash scripts/ios-native/build_llvm_host_flang.sh
+
+      - name: Verify host LLVM Flang
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -d "${NATIVE_ROOT}/llvm-${LLVM_TAG}/src/.git"
+          test -d "${NATIVE_ROOT}/llvm-${LLVM_TAG}/build-host"
+          test -x "${NATIVE_ROOT}/llvm-${LLVM_TAG}/install-host/bin/flang"
+          "${NATIVE_ROOT}/llvm-${LLVM_TAG}/install-host/bin/flang" --version
+
+      - name: Save host Flang cache
+        if: steps.restored-host-flang.outputs.present != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/src
+            ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/build-host
+            ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/install-host
+          key: ${{ steps.host-flang-cache.outputs.cache-primary-key }}
+
+      - name: Build iOS Flang runtimes
+        shell: bash
+        run: |
+          set -euxo pipefail
+          bash scripts/ios-native/build_flang_rt_ios.sh
+
+      - name: Download MUMPS source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          work="$RUNNER_TEMP/rlc-ios-mumps-proof"
+          mkdir -p "$work/src" "$work/artifacts"
+          curl -L "$MUMPS_URL" -o "$work/$MUMPS_TARBALL"
+          echo "${MUMPS_SHA256}  $work/$MUMPS_TARBALL" | shasum -a 256 -c -
+          tar -xzf "$work/$MUMPS_TARBALL" -C "$work/src"
+          find "$work/src" -maxdepth 2 -type d | sort
+
+      - name: Build MUMPS static dependencies
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          work="$RUNNER_TEMP/rlc-ios-mumps-proof"
+          llvm_root="${NATIVE_ROOT}/llvm-${LLVM_TAG}"
+          flang="$llvm_root/install-host/bin/flang"
+          src_root="$(find "$work/src" -maxdepth 1 -type d -name 'MUMPS_*' | head -n 1)"
+
+          if [[ -z "$src_root" ]]; then
+            echo "::error::MUMPS source directory not found."
+            find "$work/src" -maxdepth 2 -print
+            exit 1
+          fi
+
+          make_flang_wrapper() {
+            local wrapper="$1"
+            mkdir -p "$(dirname "$wrapper")"
+            cat > "$wrapper" <<EOF
+          #!/usr/bin/env bash
+          set -euo pipefail
+          args=()
+          skip_next=0
+          for arg in "\$@"; do
+            if [[ "\$skip_next" == 1 ]]; then
+              skip_next=0
+              continue
+            fi
+            case "\$arg" in
+              -mmacosx-version-min=*|-miphoneos-version-min=*|-mios-simulator-version-min=*) ;;
+              -arch) skip_next=1 ;;
+              *) args+=("\$arg") ;;
+            esac
+          done
+          exec "$flang" "\${args[@]}"
+          EOF
+            chmod +x "$wrapper"
+          }
+
+          create_flang_compat_modules() {
+            local build_dir="$1"
+            local sdk="$2"
+            local target_triple="$3"
+            local fc_wrapper="$4"
+            local module_dir="$build_dir/rlc_flang_modules"
+            local sysroot
+            sysroot="$(xcrun --sdk "$sdk" --show-sdk-path)"
+            mkdir -p "$module_dir"
+            cat > "$module_dir/omp_lib_stub.f90" <<'EOF'
+          module omp_lib_kinds
+            implicit none
+            integer, parameter :: omp_lock_kind = selected_int_kind(9)
+            integer, parameter :: omp_nest_lock_kind = selected_int_kind(9)
+            integer, parameter :: omp_sched_kind = selected_int_kind(9)
+            integer, parameter :: omp_proc_bind_kind = selected_int_kind(9)
+          end module omp_lib_kinds
+
+          module omp_lib
+            use omp_lib_kinds
+            implicit none
+            integer, parameter :: openmp_version = 201511
+            integer(omp_sched_kind), parameter :: omp_sched_static = 1
+            integer(omp_sched_kind), parameter :: omp_sched_dynamic = 2
+            integer(omp_sched_kind), parameter :: omp_sched_guided = 3
+            integer(omp_sched_kind), parameter :: omp_sched_auto = 4
+            integer(omp_proc_bind_kind), parameter :: omp_proc_bind_false = 0
+            integer(omp_proc_bind_kind), parameter :: omp_proc_bind_true = 1
+            integer(omp_proc_bind_kind), parameter :: omp_proc_bind_master = 2
+            integer(omp_proc_bind_kind), parameter :: omp_proc_bind_close = 3
+            integer(omp_proc_bind_kind), parameter :: omp_proc_bind_spread = 4
+          contains
+            integer function omp_get_thread_num()
+              omp_get_thread_num = 0
+            end function
+            integer function omp_get_num_threads()
+              omp_get_num_threads = 1
+            end function
+            integer function omp_get_max_threads()
+              omp_get_max_threads = 1
+            end function
+            integer function omp_get_num_procs()
+              omp_get_num_procs = 1
+            end function
+            logical function omp_in_parallel()
+              omp_in_parallel = .false.
+            end function
+            subroutine omp_set_num_threads(num_threads)
+              integer, intent(in) :: num_threads
+            end subroutine
+            subroutine omp_set_dynamic(dynamic_threads)
+              logical, intent(in) :: dynamic_threads
+            end subroutine
+            logical function omp_get_dynamic()
+              omp_get_dynamic = .false.
+            end function
+            subroutine omp_set_nested(nested)
+              logical, intent(in) :: nested
+            end subroutine
+            logical function omp_get_nested()
+              omp_get_nested = .false.
+            end function
+          end module omp_lib
+          EOF
+            "$fc_wrapper" \
+              -target "$target_triple" \
+              -isysroot "$sysroot" \
+              -O0 \
+              -fPIC \
+              -J"$module_dir" \
+              -c "$module_dir/omp_lib_stub.f90" \
+              -o "$module_dir/omp_lib_stub.o"
+          }
+
+          make_inc() {
+            local build_dir="$1"
+            local sdk="$2"
+            local min_flag="$3"
+            local min_value="$4"
+            local target_triple="$5"
+            local fc_wrapper="$6"
+
+            cat > "$build_dir/Makefile.inc" <<EOF
+          PLAT =
+          LIBEXT = .a
+          OUTC = -o
+          OUTF = -o
+
+          LIBSEQNEEDED = libseqneeded
+          INCPAR = -I\$(topdir)/libseq
+          LIBPAR = \$(topdir)/lib/libmpiseq.a
+
+          LPORDDIR = \$(topdir)/PORD/lib/
+          IPORDDIR = \$(topdir)/PORD/include/
+          LPORD = \$(topdir)/lib/libpord.a
+          IPORD = -I\$(IPORDDIR)
+
+          ORDERINGSF = -Dpord
+          ORDERINGSC = \$(ORDERINGSF)
+          LORDERINGS = \$(LPORD)
+          IORDERINGSF =
+          IORDERINGSC =
+
+          empty =
+          space = \$(empty) \$(empty)
+
+          CC = xcrun --sdk ${sdk} clang
+          FC = ${fc_wrapper}
+          FL = xcrun --sdk ${sdk} clang
+          AR = xcrun --sdk ${sdk} ar -rvs\$(space)
+          RANLIB = xcrun --sdk ${sdk} ranlib
+          RM = /bin/rm -f
+
+          C_TARGET = -target ${target_triple} -isysroot \$(shell xcrun --sdk ${sdk} --show-sdk-path) ${min_flag}=${min_value}
+          F_TARGET = -target ${target_triple} -isysroot \$(shell xcrun --sdk ${sdk} --show-sdk-path)
+
+          OPTC = \$(C_TARGET) -O2 -fPIC \$(CDEFS) -I. -I\$(topdir)/include \$(IPORD) \$(ORDERINGSC)
+          FLANG_RTTI_FLAGS = -mmlir -skip-external-rtti-definition
+          OPTF = \$(F_TARGET) -O0 -fPIC \$(FLANG_RTTI_FLAGS) -DAVOID_MPI_IN_PLACE -I${build_dir}/rlc_flang_modules -I. -I\$(topdir)/include \$(ORDERINGSF)
+          OPTL = \$(C_TARGET)
+
+          INCS = \$(INCPAR) \$(IPORD)
+          LIBBLAS = -framework Accelerate
+          LIBOTHERS =
+          LIBS = \$(LIBPAR) \$(LORDERINGS) \$(LIBBLAS) \$(LIBOTHERS)
+
+          CDEFS = -DAdd_
+          LMETISDIR =
+          IMETIS =
+          LMETIS =
+          ISCOTCH =
+          LSCOTCH =
+
+          FLFLAGS =
+          F90FLAGS = \$(OPTF)
+          FFLAGS = \$(OPTF)
+          CFLAGS = \$(OPTC)
+          LDFLAGS = \$(OPTL)
+          EOF
+          }
+
+          build_mumps_one() {
+            local name="$1"
+            local sdk="$2"
+            local min_flag="$3"
+            local min_value="$4"
+            local target_triple="$5"
+            local build_dir="$work/build-mumps-${name}"
+            local out_dir="$work/artifacts/mumps/${name}"
+            local fc_wrapper="$work/wrappers/${name}/flang-wrapper.sh"
+
+            echo "::group::mumps ${name}"
+            rm -rf "$build_dir" "$out_dir"
+            mkdir -p "$build_dir" "$out_dir"
+            make_flang_wrapper "$fc_wrapper"
+            (cd "$src_root" && tar -cf - .) | (cd "$build_dir" && tar -xf -)
+            create_flang_compat_modules "$build_dir" "$sdk" "$target_triple" "$fc_wrapper"
+            make_inc "$build_dir" "$sdk" "$min_flag" "$min_value" "$target_triple" "$fc_wrapper"
+            (
+              cd "$build_dir"
+              set -uxo pipefail
+              make clean
+              make libseqneeded
+              libseq_status="$?"
+              if [[ "$libseq_status" -ne 0 ]]; then
+                echo "::warning::MUMPS libseqneeded failed with status ${libseq_status}; archiving local OpenMP stub only to expose fake-MPI unresolved symbols in link smoke."
+              fi
+              xcrun --sdk "$sdk" ar -rvs lib/libmpiseq.a rlc_flang_modules/omp_lib_stub.o
+              xcrun --sdk "$sdk" ranlib lib/libmpiseq.a
+              make lib/libpord.a
+              make -C src d
+            ) 2>&1 | tee "$out_dir/build.log"
+            build_status="${PIPESTATUS[0]}"
+            cp "$build_dir/Makefile.inc" "$out_dir/Makefile.inc"
+            mkdir -p "$out_dir/include"
+            cp "$build_dir/include/"*.h "$out_dir/include/"
+            cp "$build_dir/libseq/mpi.h" "$out_dir/include/"
+            find "$build_dir/lib" -maxdepth 1 -type f -name '*.a' -print -exec cp {} "$out_dir/" \; || true
+            echo "::endgroup::"
+
+            if [[ "$build_status" -ne 0 ]]; then
+              echo "::error::MUMPS ${name} build failed with status ${build_status}."
+              return "$build_status"
+            fi
+
+            ls -la "$out_dir"
+            xcrun --sdk "$sdk" nm -g "$out_dir/libdmumps.a" > "$out_dir/libdmumps-nm.txt" || true
+            grep _dmumps_c "$out_dir/libdmumps-nm.txt"
+          }
+
+          status=0
+          build_mumps_one "ios-arm64" "iphoneos" "-miphoneos-version-min" "13.0" "arm64-apple-ios13.0" || status=1
+          build_mumps_one "ios-arm64-simulator" "iphonesimulator" "-mios-simulator-version-min" "13.0" "arm64-apple-ios13.0-simulator" || status=1
+          exit "$status"
+
+      - name: MUMPS link smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          work="$RUNNER_TEMP/rlc-ios-mumps-proof"
+          llvm_root="${NATIVE_ROOT}/llvm-${LLVM_TAG}"
+
+          runtime_libs_for() {
+            local name="$1"
+            find "$llvm_root/install-flangrt-${name}" -type f \( \
+              -name 'libflang_rt.runtime.a' -o \
+              -name 'libflang_rt.quadmath.a' -o \
+              -name 'libFortranRuntime.a' -o \
+              -name 'libFortranDecimal.a' \
+            \) -print | sort
+          }
+
+          audit_one() {
+            local name="$1"
+            local sdk="$2"
+            local min_flag="$3"
+            local min_value="$4"
+            local target_triple="$5"
+            local deps_dir="$work/artifacts/mumps/${name}"
+            local sdk_path
+            local runtime_link_args=()
+            sdk_path="$(xcrun --sdk "$sdk" --show-sdk-path)"
+
+            echo "::group::mumps link smoke ${name}"
+            test -f "$deps_dir/libdmumps.a"
+            test -f "$deps_dir/libmumps_common.a"
+            test -f "$deps_dir/libpord.a"
+            test -f "$deps_dir/libmpiseq.a"
+            test -f "$deps_dir/include/dmumps_c.h"
+            test -f "$deps_dir/include/mumps_compat.h"
+            test -f "$deps_dir/include/mpi.h"
+
+            if find "$deps_dir" -type f \( -name '*.dylib' -o -name '*.so' -o -name '*.dll' \) | grep .; then
+              echo "::error::Forbidden dynamic library found in iOS MUMPS proof."
+              exit 1
+            fi
+
+            while IFS= read -r lib; do
+              [[ -n "$lib" ]] || continue
+              runtime_link_args+=("-Wl,-force_load,$lib")
+              cp "$lib" "$deps_dir/$(basename "$lib")"
+            done < <(runtime_libs_for "$name")
+
+            cat > "$deps_dir/dmumps_smoke.c" <<'EOF'
+          #include "dmumps_c.h"
+          void *rlc_dmumps_smoke_symbol(void) {
+            return (void *)&dmumps_c;
+          }
+          EOF
+            xcrun --sdk "$sdk" clang \
+              -target "$target_triple" \
+              -isysroot "$sdk_path" \
+              "${min_flag}=${min_value}" \
+              -I"$deps_dir/include" \
+              -c "$deps_dir/dmumps_smoke.c" \
+              -o "$deps_dir/dmumps_smoke.o"
+
+            set +e
+            xcrun --sdk "$sdk" clang++ \
+              -target "$target_triple" \
+              -isysroot "$sdk_path" \
+              "${min_flag}=${min_value}" \
+              -dynamiclib \
+              -Wl,-undefined,error \
+              "$deps_dir/dmumps_smoke.o" \
+              "$deps_dir/libdmumps.a" \
+              "$deps_dir/libmumps_common.a" \
+              "$deps_dir/libpord.a" \
+              "$deps_dir/libmpiseq.a" \
+              "${runtime_link_args[@]}" \
+              -framework Accelerate \
+              -lc++ \
+              -lm \
+              -o "$deps_dir/dmumps_symbol_link_smoke.dylib" \
+              > "$deps_dir/dmumps-symbol-link.log" 2>&1
+            symbol_status="$?"
+
+            xcrun --sdk "$sdk" clang++ \
+              -target "$target_triple" \
+              -isysroot "$sdk_path" \
+              "${min_flag}=${min_value}" \
+              -dynamiclib \
+              -Wl,-undefined,error \
+              "$deps_dir/dmumps_smoke.o" \
+              -Wl,-force_load,"$deps_dir/libdmumps.a" \
+              -Wl,-force_load,"$deps_dir/libmumps_common.a" \
+              -Wl,-force_load,"$deps_dir/libpord.a" \
+              -Wl,-force_load,"$deps_dir/libmpiseq.a" \
+              "${runtime_link_args[@]}" \
+              -framework Accelerate \
+              -lc++ \
+              -lm \
+              -o "$deps_dir/dmumps_full_archive_link_smoke.dylib" \
+              > "$deps_dir/dmumps-full-archive-link.log" 2>&1
+            full_status="$?"
+            set -e
+
+            cat "$deps_dir/dmumps-symbol-link.log"
+            cat "$deps_dir/dmumps-full-archive-link.log"
+
+            if [[ "$symbol_status" -eq 0 ]]; then
+              otool -L "$deps_dir/dmumps_symbol_link_smoke.dylib" | tee "$deps_dir/dmumps-symbol-otool.txt"
+            fi
+            if [[ "$full_status" -eq 0 ]]; then
+              otool -L "$deps_dir/dmumps_full_archive_link_smoke.dylib" | tee "$deps_dir/dmumps-full-archive-otool.txt"
+            fi
+
+            if [[ "$symbol_status" -ne 0 || "$full_status" -ne 0 ]]; then
+              echo "::error::MUMPS link smoke failed for ${name}: symbol=${symbol_status}, full_archive=${full_status}. See dmumps-*-link.log artifacts."
+              exit 1
+            fi
+            echo "::endgroup::"
+          }
+
+          audit_one "ios-arm64" "iphoneos" "-miphoneos-version-min" "13.0" "arm64-apple-ios13.0"
+          audit_one "ios-arm64-simulator" "iphonesimulator" "-mios-simulator-version-min" "13.0" "arm64-apple-ios13.0-simulator"
+
+      - name: Upload MUMPS proof artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-mumps-proof-output
+          path: ${{ runner.temp }}/rlc-ios-mumps-proof/artifacts
+          retention-days: 1
