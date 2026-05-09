@@ -25,6 +25,7 @@ jobs:
       MUMPS_TARBALL: "mumps_5.7.3.orig.tar.gz"
       MUMPS_SHA256: "84a47f7c4231b9efdf4d4f631a2cae2bdd9adeaabc088261d15af040143ed112"
       MUMPS_URL: "https://deb.debian.org/debian/pool/main/m/mumps/mumps_5.7.3.orig.tar.gz"
+      NATIVE_DEPS_ARTIFACT: "rlc-ios-native-deps-llvm22.1.5-ipopt3.14.17-mumps5.7.3-ios13-arm64"
 
     steps:
       - name: Checkout
@@ -533,6 +534,8 @@ jobs:
 
           work="$RUNNER_TEMP/rlc-ios-ipopt-proof"
           llvm_root="${NATIVE_ROOT}/llvm-${LLVM_TAG}"
+          ipopt_src="$(find "$work/src" -maxdepth 1 -type d \( -name 'coinor-ipopt-*' -o -name 'Ipopt-*' \) | head -n 1)"
+          mumps_src="$(find "$work/src" -maxdepth 1 -type d -name 'MUMPS_*' | head -n 1)"
 
           runtime_libs_for() {
             local name="$1"
@@ -689,6 +692,74 @@ jobs:
           package_one "ios-arm64-simulator" "iphonesimulator"
           audit_one "ios-arm64" "iphoneos" "-miphoneos-version-min" "13.0" "arm64-apple-ios13.0"
           audit_one "ios-arm64-simulator" "iphonesimulator" "-mios-simulator-version-min" "13.0" "arm64-apple-ios13.0-simulator"
+
+          native_deps="$work/artifacts/native-deps"
+          license_dir="$native_deps/LICENSES"
+          mkdir -p "$license_dir"
+          cp LICENSES/README.md "$license_dir/README.md"
+          if [[ -f "$llvm_root/src/LICENSE.TXT" ]]; then
+            cp "$llvm_root/src/LICENSE.TXT" "$license_dir/LLVM-LICENSE.TXT"
+          fi
+          if [[ -n "$ipopt_src" ]]; then
+            find "$ipopt_src" -maxdepth 3 -type f \( \
+              -iname '*license*' -o -iname '*copying*' -o -iname '*notice*' \
+            \) -exec cp {} "$license_dir/" \; || true
+          fi
+          if [[ -n "$mumps_src" ]]; then
+            find "$mumps_src" -maxdepth 3 -type f \( \
+              -iname '*license*' -o -iname '*copying*' -o -iname '*notice*' \
+            \) -exec cp {} "$license_dir/" \; || true
+          fi
+
+          cat > "$native_deps/manifest.json" <<EOF
+          {
+            "name": "rlc-ios-native-deps",
+            "artifact": "${NATIVE_DEPS_ARTIFACT}",
+            "llvm_tag": "${LLVM_TAG}",
+            "iphoneos_deployment_target": "${IPHONEOS_DEPLOYMENT_TARGET}",
+            "ipopt_version": "${IPOPT_VERSION}",
+            "ipopt_source": "${IPOPT_URL}",
+            "ipopt_sha256": "${IPOPT_SHA256}",
+            "mumps_version": "${MUMPS_VERSION}",
+            "mumps_source": "${MUMPS_URL}",
+            "mumps_sha256": "${MUMPS_SHA256}",
+            "blas_lapack": "Apple Accelerate",
+            "slices": [
+              {
+                "name": "ios-arm64",
+                "clang_target": "arm64-apple-ios13.0",
+                "rust_target": "aarch64-apple-ios"
+              },
+              {
+                "name": "ios-arm64-simulator",
+                "clang_target": "arm64-apple-ios13.0-simulator",
+                "rust_target": "aarch64-apple-ios-sim"
+              }
+            ],
+            "system_link_deps": [
+              "Accelerate.framework",
+              "libc++",
+              "libm"
+            ],
+            "libraries": [
+              "libipopt.a",
+              "libdmumps.a",
+              "libmumps_common.a",
+              "libpord.a",
+              "libmpiseq.a",
+              "libflang_rt.runtime.a"
+            ]
+          }
+          EOF
+
+          mkdir -p "$work/artifacts/dist"
+          (
+            cd "$work/artifacts"
+            tar -czf "dist/${NATIVE_DEPS_ARTIFACT}.tar.gz" native-deps
+            shasum -a 256 "dist/${NATIVE_DEPS_ARTIFACT}.tar.gz" \
+              > "dist/${NATIVE_DEPS_ARTIFACT}.tar.gz.sha256"
+          )
+          cat "$work/artifacts/dist/${NATIVE_DEPS_ARTIFACT}.tar.gz.sha256"
 
       - name: Upload IPOPT proof artifacts
         if: always()
