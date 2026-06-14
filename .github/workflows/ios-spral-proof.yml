@@ -179,6 +179,37 @@ jobs:
             echo "$runtime"
           }
 
+          ensure_flang_driver_runtime_stub() {
+            local name="$1"
+            local sdk="$2"
+            local target="$3"
+            local suffix
+            local runtime_dir
+            local tmp
+            local cc
+            local ar_tool
+
+            case "$name" in
+              ios-arm64) suffix="runtime_ios" ;;
+              ios-arm64-simulator) suffix="runtime_iossim" ;;
+              *) echo "::error::Unknown iOS slice for Flang runtime stub: $name"; exit 1 ;;
+            esac
+
+            runtime_dir="$llvm_root/install-host/lib/clang/22/lib/darwin"
+            mkdir -p "$runtime_dir"
+            if [[ -f "$runtime_dir/libclang_rt.${suffix}.a" ]]; then
+              return
+            fi
+
+            tmp="$(mktemp -d)"
+            cc="$(xcrun --sdk "$sdk" --find clang)"
+            ar_tool="$(xcrun --sdk "$sdk" --find ar)"
+            echo 'int rlc_empty_clang_runtime_stub = 0;' > "$tmp/empty.c"
+            "$cc" -target "$target" -isysroot "$(xcrun --sdk "$sdk" --show-sdk-path)" -c "$tmp/empty.c" -o "$tmp/empty.o"
+            "$ar_tool" -crs "$runtime_dir/libclang_rt.${suffix}.a" "$tmp/empty.o"
+            rm -rf "$tmp"
+          }
+
           make_flang_wrapper() {
             local wrapper="$1"
             mkdir -p "$(dirname "$wrapper")"
@@ -257,6 +288,7 @@ jobs:
             ranlib="$(xcrun --sdk "$sdk" --find ranlib)"
             flang_rt="$(find_flang_rt "$name")"
             flang_rt_dir="$(dirname "$flang_rt")"
+            ensure_flang_driver_runtime_stub "$name" "$sdk" "$target"
             build_root="$work/build/${name}"
             prefix="$work/artifacts/spral/${name}"
             wrappers="$work/wrappers/${name}"
