@@ -179,6 +179,32 @@ jobs:
             echo "$runtime"
           }
 
+          find_apple_compiler_runtime() {
+            local name="$1"
+            local sdk="$2"
+            local apple_suffix
+            local cc
+            local runtime_dir
+            local runtime
+
+            case "$name" in
+              ios-arm64) apple_suffix="ios" ;;
+              ios-arm64-simulator) apple_suffix="iossim" ;;
+              *) echo "::error::Unknown iOS slice for Apple compiler runtime: $name"; exit 1 ;;
+            esac
+
+            cc="$(xcrun --sdk "$sdk" --find clang)"
+            runtime_dir="$("$cc" -print-resource-dir)/lib/darwin"
+            runtime="$runtime_dir/libclang_rt.${apple_suffix}.a"
+            if [[ ! -f "$runtime" ]]; then
+              echo "::warning::Apple compiler runtime not found at $runtime" >&2
+              echo ""
+              return
+            fi
+
+            echo "$runtime"
+          }
+
           ensure_flang_driver_runtime_stub() {
             local name="$1"
             local sdk="$2"
@@ -226,6 +252,34 @@ jobs:
             rm -rf "$tmp"
           }
 
+          find_apple_compiler_runtime() {
+            local name="$1"
+            local sdk="$2"
+            local apple_suffix
+            local cc
+            local runtime_dir
+            local runtime
+
+            case "$name" in
+              ios-arm64) apple_suffix="ios" ;;
+              ios-arm64-simulator) apple_suffix="iossim" ;;
+              *) echo "::error::Unknown iOS slice for Apple compiler runtime: $name"; exit 1 ;;
+            esac
+
+            cc="$(xcrun --sdk "$sdk" --find clang)"
+            runtime_dir="$("$cc" -print-resource-dir)/lib/darwin"
+            runtime="$runtime_dir/libclang_rt.${apple_suffix}.a"
+            if [[ ! -f "$runtime" ]]; then
+              echo "::warning::Apple compiler runtime not found at $runtime" >&2
+              echo "::warning::Available Darwin compiler runtimes:" >&2
+              find "$runtime_dir" -maxdepth 1 -type f -name 'libclang_rt*.a' -print | sort >&2 || true
+              echo ""
+              return
+            fi
+
+            echo "$runtime"
+          }
+
           make_flang_wrapper() {
             local wrapper="$1"
             mkdir -p "$(dirname "$wrapper")"
@@ -253,6 +307,9 @@ jobs:
           fi
           if [[ "\$compile_only" == 0 && -n "\${RLC_FLANG_RT_LIB:-}" ]]; then
             link_args+=("-Wl,-force_load,\${RLC_FLANG_RT_LIB}")
+          fi
+          if [[ "\$compile_only" == 0 && -n "\${RLC_APPLE_COMPILER_RT_LIB:-}" ]]; then
+            link_args+=("-Wl,-force_load,\${RLC_APPLE_COMPILER_RT_LIB}")
           fi
           exec "$flang" -fintrinsic-modules-path "$flang_intrinsic_modules" "\${args[@]}" "\${link_args[@]}"
           EOF
@@ -301,6 +358,7 @@ jobs:
             local ranlib
             local flang_rt
             local flang_rt_dir
+            local apple_compiler_rt
 
             sysroot="$(xcrun --sdk "$sdk" --show-sdk-path)"
             ar="$(xcrun --sdk "$sdk" --find ar)"
@@ -308,6 +366,7 @@ jobs:
             flang_rt="$(find_flang_rt "$name")"
             flang_rt_dir="$(dirname "$flang_rt")"
             ensure_flang_driver_runtime_stub "$name" "$sdk" "$target"
+            apple_compiler_rt="$(find_apple_compiler_runtime "$name" "$sdk")"
             build_root="$work/build/${name}"
             prefix="$work/artifacts/spral/${name}"
             wrappers="$work/wrappers/${name}"
@@ -387,6 +446,7 @@ jobs:
             mkdir -p "$build_root/spral-modules"
             export RLC_FLANG_RT_DIR="$flang_rt_dir"
             export RLC_FLANG_RT_LIB="$flang_rt"
+            export RLC_APPLE_COMPILER_RT_LIB="$apple_compiler_rt"
             meson setup "$build_root/spral" "$work/src/spral" \
               --cross-file "$build_root/spral-cross.ini" \
               --prefix "$prefix" \
@@ -441,7 +501,9 @@ jobs:
           #!/usr/bin/env bash
           set -euo pipefail
           args=()
+          link_args=()
           skip_next=0
+          compile_only=0
           for arg in "\$@"; do
             if [[ "\$skip_next" == 1 ]]; then
               skip_next=0
@@ -450,12 +512,50 @@ jobs:
             case "\$arg" in
               -mmacosx-version-min=*|-miphoneos-version-min=*|-mios-simulator-version-min=*) ;;
               -arch) skip_next=1 ;;
+              -c|-E|-S) compile_only=1; args+=("\$arg") ;;
               *) args+=("\$arg") ;;
             esac
           done
-          exec "$flang" -fintrinsic-modules-path "$flang_intrinsic_modules" "\${args[@]}"
+          if [[ "\$compile_only" == 0 && -n "\${RLC_FLANG_RT_DIR:-}" ]]; then
+            link_args+=("-L\${RLC_FLANG_RT_DIR}")
+          fi
+          if [[ "\$compile_only" == 0 && -n "\${RLC_FLANG_RT_LIB:-}" ]]; then
+            link_args+=("-Wl,-force_load,\${RLC_FLANG_RT_LIB}")
+          fi
+          if [[ "\$compile_only" == 0 && -n "\${RLC_APPLE_COMPILER_RT_LIB:-}" ]]; then
+            link_args+=("-Wl,-force_load,\${RLC_APPLE_COMPILER_RT_LIB}")
+          fi
+          exec "$flang" -fintrinsic-modules-path "$flang_intrinsic_modules" "\${args[@]}" "\${link_args[@]}"
           EOF
             chmod +x "$wrapper"
+          }
+
+          find_apple_compiler_runtime() {
+            local name="$1"
+            local sdk="$2"
+            local apple_suffix
+            local cc
+            local runtime_dir
+            local runtime
+
+            case "$name" in
+              ios-arm64) apple_suffix="ios" ;;
+              ios-arm64-simulator) apple_suffix="iossim" ;;
+              *) echo "::error::Unknown iOS slice for Apple compiler runtime: $name"; exit 1 ;;
+            esac
+
+            cc="$(xcrun --sdk "$sdk" --find clang)"
+            runtime_dir="$("$cc" -print-resource-dir)/lib/darwin"
+            runtime="$runtime_dir/libclang_rt.${apple_suffix}.a"
+            if [[ ! -f "$runtime" ]]; then
+              echo "::warning::Apple compiler runtime not found at $runtime" >&2
+              echo "::warning::Available Darwin compiler runtimes:" >&2
+              find "$runtime_dir" -maxdepth 1 -type f -name 'libclang_rt*.a' -print | sort >&2 || true
+              echo ""
+              return
+            fi
+
+            echo "$runtime"
           }
 
           find_flang_rt() {
@@ -504,6 +604,8 @@ jobs:
             local cc
             local cxx
             local flang_rt
+            local flang_rt_dir
+            local apple_compiler_rt
 
             sysroot="$(xcrun --sdk "$sdk" --show-sdk-path)"
             ar="$(xcrun --sdk "$sdk" --find ar)"
@@ -515,6 +617,8 @@ jobs:
             spral_dir="$work/artifacts/spral/${name}"
             fc_wrapper="$work/wrappers/${name}/flang-wrapper.sh"
             flang_rt="$(find_flang_rt "$name")"
+            flang_rt_dir="$(dirname "$flang_rt")"
+            apple_compiler_rt="$(find_apple_compiler_runtime "$name" "$sdk")"
 
             rm -rf "$build_dir" "$install_dir"
             mkdir -p "$build_dir" "$install_dir" "$(dirname "$fc_wrapper")"
@@ -526,6 +630,9 @@ jobs:
               export CXX="$cxx"
               export FC="$fc_wrapper"
               export F77="$fc_wrapper"
+              export RLC_FLANG_RT_DIR="$flang_rt_dir"
+              export RLC_FLANG_RT_LIB="$flang_rt"
+              export RLC_APPLE_COMPILER_RT_LIB="$apple_compiler_rt"
               export AR="$ar"
               export RANLIB="$ranlib"
               export CFLAGS="-target $target -isysroot $sysroot $minflag -fPIC -O2 -I$spral_dir/include"
@@ -533,8 +640,8 @@ jobs:
               export FCFLAGS="-target $target -isysroot $sysroot -fPIC -O2"
               export FFLAGS="$FCFLAGS"
               export LDFLAGS="-target $target -isysroot $sysroot $minflag"
-              export FLIBS="$flang_rt"
-              export ac_cv_f77_libs="$flang_rt"
+              export FLIBS="$flang_rt $apple_compiler_rt"
+              export ac_cv_f77_libs="$flang_rt $apple_compiler_rt"
               export ac_cv_f77_dummy_main=none
               export ac_cv_fortran_dummy_main=none
               export ac_cv_func_malloc_0_nonnull=yes
@@ -558,7 +665,7 @@ jobs:
                 --with-blas="-framework Accelerate" \
                 --with-lapack="-framework Accelerate" \
                 --with-spral-cflags="-I$spral_dir/include" \
-                --with-spral-lflags="${spral_dir}/lib/libspral.a ${spral_dir}/lib/libmetis.a ${spral_dir}/lib/libGKlib.a ${flang_rt} -framework Accelerate -lc++ -lm" \
+                --with-spral-lflags="${spral_dir}/lib/libspral.a ${spral_dir}/lib/libmetis.a ${spral_dir}/lib/libGKlib.a ${flang_rt} ${apple_compiler_rt} -framework Accelerate -lc++ -lm" \
                 > "$install_dir-config.log" 2>&1
               make -j"$(sysctl -n hw.ncpu)" > "$install_dir-build.log" 2>&1
               make install > "$install_dir-install.log" 2>&1
@@ -617,9 +724,11 @@ jobs:
             local ipopt_dir="$work/artifacts/ipopt/${name}"
             local spral_dir="$work/artifacts/spral/${name}"
             local flang_rt
+            local apple_compiler_rt
             local sysroot
 
             flang_rt="$(find_flang_rt "$name")"
+            apple_compiler_rt="$(find_apple_compiler_runtime "$name" "$sdk")"
             sysroot="$(xcrun --sdk "$sdk" --show-sdk-path)"
 
             rm -rf "$deps_dir"
@@ -687,6 +796,11 @@ jobs:
           }
           EOF
 
+            apple_rt_link_args=()
+            if [[ -n "$apple_compiler_rt" ]]; then
+              apple_rt_link_args+=("-Wl,-force_load,$apple_compiler_rt")
+            fi
+
             xcrun --sdk "$sdk" clang++ \
               -target "$target" \
               -isysroot "$sysroot" \
@@ -699,6 +813,7 @@ jobs:
               -Wl,-force_load,"$deps_dir/lib/libmetis.a" \
               -Wl,-force_load,"$deps_dir/lib/libGKlib.a" \
               -Wl,-force_load,"$deps_dir/lib/libflang_rt.runtime.a" \
+              "${apple_rt_link_args[@]}" \
               -framework Accelerate \
               -lc++ \
               -lm \
