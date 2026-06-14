@@ -137,6 +137,9 @@ jobs:
           git clone --depth 1 --branch "$SPRAL_TAG" https://github.com/ralna/spral.git "$work/src/spral"
           git clone --depth 1 --branch "$METIS_TAG" https://github.com/KarypisLab/METIS.git "$work/src/metis"
           git clone --depth 1 --branch "$GKLIB_REF" https://github.com/KarypisLab/GKlib.git "$work/src/metis/GKlib"
+          perl -0pi -e 's/int gk_mkpath\(char \*pathname\)\s*\{\s*char tmp\[2048\];\s*sprintf\(tmp, "mkdir -p %s", pathname\);\s*return system\(tmp\);\s*\}/int gk_mkpath(char *pathname) { if (gk_dexists(pathname)) return 0; return mkdir(pathname, 0777); }/s' "$work/src/metis/GKlib/src/fs.c"
+          perl -0pi -e 's/int gk_rmpath\(char \*pathname\)\s*\{\s*char tmp\[2048\];\s*sprintf\(tmp, "rm -r %s", pathname\);\s*return system\(tmp\);\s*\}/int gk_rmpath(char *pathname) { return remove(pathname); }/s' "$work/src/metis/GKlib/src/fs.c"
+          grep -nE 'int gk_(mkpath|rmpath)' "$work/src/metis/GKlib/src/fs.c"
           curl -L "$IPOPT_URL" -o "$work/$IPOPT_TARBALL"
           echo "${IPOPT_SHA256}  $work/$IPOPT_TARBALL" | shasum -a 256 -c -
           tar -xzf "$work/$IPOPT_TARBALL" -C "$work/src"
