@@ -167,6 +167,18 @@ jobs:
           flang="$llvm_root/install-host/bin/flang"
           flang_intrinsic_modules="$llvm_root/install-host/include/flang"
 
+          find_flang_rt() {
+            local name="$1"
+            local runtime
+            runtime="$(find "$llvm_root/install-flangrt-${name}" -type f -name 'libflang_rt.runtime.a' -print | head -n 1)"
+            if [[ -z "$runtime" ]]; then
+              echo "::error::libflang_rt.runtime.a not found for $name."
+              find "$llvm_root/install-flangrt-${name}" -type f -print || true
+              exit 1
+            fi
+            echo "$runtime"
+          }
+
           make_flang_wrapper() {
             local wrapper="$1"
             mkdir -p "$(dirname "$wrapper")"
@@ -174,7 +186,9 @@ jobs:
           #!/usr/bin/env bash
           set -euo pipefail
           args=()
+          link_args=()
           skip_next=0
+          compile_only=0
           for arg in "\$@"; do
             if [[ "\$skip_next" == 1 ]]; then
               skip_next=0
@@ -183,10 +197,14 @@ jobs:
             case "\$arg" in
               -mmacosx-version-min=*|-miphoneos-version-min=*|-mios-simulator-version-min=*) ;;
               -arch) skip_next=1 ;;
+              -c|-E|-S) compile_only=1; args+=("\$arg") ;;
               *) args+=("\$arg") ;;
             esac
           done
-          exec "$flang" -fintrinsic-modules-path "$flang_intrinsic_modules" "\${args[@]}"
+          if [[ "\$compile_only" == 0 && -n "\${RLC_FLANG_RT_DIR:-}" ]]; then
+            link_args+=("-L\${RLC_FLANG_RT_DIR}" "-static-libflangrt")
+          fi
+          exec "$flang" -fintrinsic-modules-path "$flang_intrinsic_modules" "\${args[@]}" "\${link_args[@]}"
           EOF
             chmod +x "$wrapper"
           }
@@ -231,10 +249,14 @@ jobs:
             local fc_wrapper
             local ar
             local ranlib
+            local flang_rt
+            local flang_rt_dir
 
             sysroot="$(xcrun --sdk "$sdk" --show-sdk-path)"
             ar="$(xcrun --sdk "$sdk" --find ar)"
             ranlib="$(xcrun --sdk "$sdk" --find ranlib)"
+            flang_rt="$(find_flang_rt "$name")"
+            flang_rt_dir="$(dirname "$flang_rt")"
             build_root="$work/build/${name}"
             prefix="$work/artifacts/spral/${name}"
             wrappers="$work/wrappers/${name}"
@@ -302,7 +324,7 @@ jobs:
           fortran_args = ['-target', '$target', '-isysroot', '$sysroot', '-fPIC', '-O2', '-J$build_root/spral-modules']
           c_link_args = ['-target', '$target', '-isysroot', '$sysroot', '$minflag']
           cpp_link_args = ['-target', '$target', '-isysroot', '$sysroot', '$minflag', '-stdlib=libc++']
-          fortran_link_args = ['-target', '$target', '-isysroot', '$sysroot']
+          fortran_link_args = ['-target', '$target', '-isysroot', '$sysroot', '-L$flang_rt_dir', '-static-libflangrt']
 
           [host_machine]
           system = 'darwin'
@@ -312,6 +334,7 @@ jobs:
           EOF
 
             mkdir -p "$build_root/spral-modules"
+            export RLC_FLANG_RT_DIR="$flang_rt_dir"
             meson setup "$build_root/spral" "$work/src/spral" \
               --cross-file "$build_root/spral-cross.ini" \
               --prefix "$prefix" \
