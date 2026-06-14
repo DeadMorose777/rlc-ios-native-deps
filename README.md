@@ -48,9 +48,31 @@ Current full native-deps acceptance:
 - smoke binary has no Homebrew, macOS LLVM, standalone Fortran, or gfortran
   dylib dependency.
 
+Run the SPRAL-only proof workflow:
+
+```bash
+gh workflow run ios-spral-proof.yml --ref master
+```
+
+Current SPRAL proof intent:
+
+- host Flang and iOS Flang runtime come from the same pinned LLVM tag;
+- METIS/GKlib are built as iOS static libraries;
+- SPRAL is built as an iOS static library with MUMPS excluded;
+- IPOPT is built static with SPRAL and without MUMPS;
+- final link smoke force-loads IPOPT, SPRAL, METIS, GKlib, and Flang runtime;
+- smoke binary has no MUMPS symbols, no unresolved `_mpi_` or `__FortranA`
+  symbols, and no Homebrew, macOS LLVM, standalone Fortran, or gfortran dylib
+  dependency.
+
+This workflow is a spike. A failure is still useful if it isolates whether the
+blocker is METIS/GKlib cross-build, SPRAL Meson cross-build, OpenMP/hwloc, or
+IPOPT `--with-spral` linkage.
+
 ## Release artifact
 
-The release payload is produced by `ios-ipopt-proof.yml` as:
+The release payload is produced by `ios-ipopt-proof.yml` or
+`ios-spral-proof.yml` as:
 
 ```text
 dist/

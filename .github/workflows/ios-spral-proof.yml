@@ -1,0 +1,681 @@
+name: iOS SPRAL Proof
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  spral-proof:
+    name: Build IPOPT SPRAL-only static libs for iOS
+    runs-on: macos-latest
+    timeout-minutes: 360
+
+    env:
+      LLVM_TAG: llvmorg-22.1.5
+      IPHONEOS_DEPLOYMENT_TARGET: "13.0"
+      NATIVE_ROOT: /tmp/rlc-ios-flang-rt-proof/native
+      LLVM_BUILD_JOBS: "3"
+      IPOPT_VERSION: "3.14.17"
+      IPOPT_TARBALL: "coinor-ipopt_3.14.17.orig.tar.gz"
+      IPOPT_SHA256: "33b397a9b07e0e14c223214da68b47529f687d87743e627ac05ca118c690e133"
+      IPOPT_URL: "https://deb.debian.org/debian/pool/main/c/coinor-ipopt/coinor-ipopt_3.14.17.orig.tar.gz"
+      SPRAL_TAG: "v2025.09.18"
+      METIS_TAG: "v5.2.1"
+      GKLIB_REF: "master"
+      NATIVE_DEPS_ARTIFACT: "rlc-ios-native-deps-llvm22.1.5-ipopt3.14.17-spral2025.09.18-ios13-arm64"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Environment
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sw_vers
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          xcrun --sdk iphonesimulator --show-sdk-path
+          df -h
+          sysctl -n hw.ncpu
+          cmake --version || true
+          ninja --version || true
+          meson --version || true
+
+      - name: Install native build tools
+        shell: bash
+        run: |
+          set -euxo pipefail
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install cmake ninja pkgconf meson || true
+          cmake --version
+          ninja --version
+          pkg-config --version
+          meson --version
+
+      - name: Restore host Flang cache
+        id: host-flang-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/src
+            ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/build-host
+            ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/install-host
+          key: rlc-ios-host-flang-${{ runner.os }}-${{ runner.arch }}-${{ env.LLVM_TAG }}-${{ hashFiles('scripts/ios-native/build_llvm_host_flang.sh') }}-v2
+          restore-keys: |
+            rlc-ios-host-flang-${{ runner.os }}-${{ runner.arch }}-${{ env.LLVM_TAG }}-
+
+      - name: Check restored host Flang
+        id: restored-host-flang
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if [[ -x "${NATIVE_ROOT}/llvm-${LLVM_TAG}/install-host/bin/flang" ]]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build host LLVM Flang
+        if: steps.restored-host-flang.outputs.present != 'true'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          bash scripts/ios-native/build_llvm_host_flang.sh
+
+      - name: Ensure host Flang intrinsic modules
+        shell: bash
+        run: |
+          set -euxo pipefail
+          llvm_root="${NATIVE_ROOT}/llvm-${LLVM_TAG}"
+          if [[ ! -f "$llvm_root/install-host/include/flang/iso_c_binding.mod" ]]; then
+            cmake --build "$llvm_root/build-host" --target module_files -j"${LLVM_BUILD_JOBS}"
+            cmake --build "$llvm_root/build-host" --target install-flang-module-interfaces -j"${LLVM_BUILD_JOBS}" || true
+            mkdir -p "$llvm_root/install-host/include/flang"
+            rsync -a "$llvm_root/build-host/include/flang/" "$llvm_root/install-host/include/flang/"
+          fi
+          test -f "$llvm_root/install-host/include/flang/iso_c_binding.mod"
+          test -f "$llvm_root/install-host/include/flang/__fortran_builtins.mod"
+
+      - name: Verify host LLVM Flang
+        shell: bash
+        run: |
+          set -euxo pipefail
+          llvm_root="${NATIVE_ROOT}/llvm-${LLVM_TAG}"
+          flang="$llvm_root/install-host/bin/flang"
+          flang_mods="$llvm_root/install-host/include/flang"
+          test -d "$llvm_root/src/.git"
+          test -d "$llvm_root/build-host"
+          test -x "$flang"
+          test -f "$flang_mods/iso_c_binding.mod"
+          test -f "$flang_mods/__fortran_builtins.mod"
+          "$flang" --version
+
+      - name: Save host Flang cache
+        if: steps.host-flang-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/src
+            ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/build-host
+            ${{ env.NATIVE_ROOT }}/llvm-${{ env.LLVM_TAG }}/install-host
+          key: ${{ steps.host-flang-cache.outputs.cache-primary-key }}
+
+      - name: Build iOS Flang runtimes
+        shell: bash
+        run: |
+          set -euxo pipefail
+          bash scripts/ios-native/build_flang_rt_ios.sh
+
+      - name: Download sources
+        shell: bash
+        run: |
+          set -euxo pipefail
+          work="$RUNNER_TEMP/rlc-ios-spral-proof"
+          mkdir -p "$work/src" "$work/artifacts"
+          git clone --depth 1 --branch "$SPRAL_TAG" https://github.com/ralna/spral.git "$work/src/spral"
+          git clone --depth 1 --branch "$METIS_TAG" https://github.com/KarypisLab/METIS.git "$work/src/metis"
+          git clone --depth 1 --branch "$GKLIB_REF" https://github.com/KarypisLab/GKlib.git "$work/src/metis/GKlib"
+          curl -L "$IPOPT_URL" -o "$work/$IPOPT_TARBALL"
+          echo "${IPOPT_SHA256}  $work/$IPOPT_TARBALL" | shasum -a 256 -c -
+          tar -xzf "$work/$IPOPT_TARBALL" -C "$work/src"
+          find "$work/src" -maxdepth 2 -type d | sort
+          sed -n '1,140p' "$work/src/spral/meson_options.txt"
+
+      - name: Build METIS and SPRAL static dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          work="$RUNNER_TEMP/rlc-ios-spral-proof"
+          llvm_root="${NATIVE_ROOT}/llvm-${LLVM_TAG}"
+          flang="$llvm_root/install-host/bin/flang"
+          flang_intrinsic_modules="$llvm_root/install-host/include/flang"
+
+          make_flang_wrapper() {
+            local wrapper="$1"
+            mkdir -p "$(dirname "$wrapper")"
+            cat > "$wrapper" <<EOF
+          #!/usr/bin/env bash
+          set -euo pipefail
+          args=()
+          skip_next=0
+          for arg in "\$@"; do
+            if [[ "\$skip_next" == 1 ]]; then
+              skip_next=0
+              continue
+            fi
+            case "\$arg" in
+              -mmacosx-version-min=*|-miphoneos-version-min=*|-mios-simulator-version-min=*) ;;
+              -arch) skip_next=1 ;;
+              *) args+=("\$arg") ;;
+            esac
+          done
+          exec "$flang" -fintrinsic-modules-path "$flang_intrinsic_modules" "\${args[@]}"
+          EOF
+            chmod +x "$wrapper"
+          }
+
+          make_clang_wrapper() {
+            local wrapper="$1"
+            local compiler="$2"
+            mkdir -p "$(dirname "$wrapper")"
+            cat > "$wrapper" <<EOF
+          #!/usr/bin/env bash
+          set -euo pipefail
+          args=()
+          skip_next=0
+          for arg in "\$@"; do
+            if [[ "\$skip_next" == 1 ]]; then
+              skip_next=0
+              continue
+            fi
+            case "\$arg" in
+              -mmacosx-version-min=*|-miphoneos-version-min=*|-mios-simulator-version-min=*) ;;
+              -arch) skip_next=1 ;;
+              *) args+=("\$arg") ;;
+            esac
+          done
+          exec "$compiler" "\${args[@]}"
+          EOF
+            chmod +x "$wrapper"
+          }
+
+          build_one_slice() {
+            local name="$1"
+            local sdk="$2"
+            local target="$3"
+            local minflag="$4"
+            local host="$5"
+
+            local sysroot
+            local build_root
+            local prefix
+            local wrappers
+            local cc_wrapper
+            local cxx_wrapper
+            local fc_wrapper
+            local ar
+            local ranlib
+
+            sysroot="$(xcrun --sdk "$sdk" --show-sdk-path)"
+            ar="$(xcrun --sdk "$sdk" --find ar)"
+            ranlib="$(xcrun --sdk "$sdk" --find ranlib)"
+            build_root="$work/build/${name}"
+            prefix="$work/artifacts/spral/${name}"
+            wrappers="$work/wrappers/${name}"
+            cc_wrapper="$wrappers/clang-wrapper.sh"
+            cxx_wrapper="$wrappers/clangxx-wrapper.sh"
+            fc_wrapper="$wrappers/flang-wrapper.sh"
+
+            rm -rf "$build_root" "$prefix" "$wrappers"
+            mkdir -p "$build_root" "$prefix" "$wrappers"
+
+            make_clang_wrapper "$cc_wrapper" "$(xcrun --sdk "$sdk" --find clang)"
+            make_clang_wrapper "$cxx_wrapper" "$(xcrun --sdk "$sdk" --find clang++)"
+            make_flang_wrapper "$fc_wrapper"
+
+            cmake -S "$work/src/metis/GKlib" -B "$build_root/gklib" -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_INSTALL_PREFIX="$prefix" \
+              -DCMAKE_SYSTEM_NAME=iOS \
+              -DCMAKE_OSX_SYSROOT="$sysroot" \
+              -DCMAKE_OSX_ARCHITECTURES=arm64 \
+              -DCMAKE_OSX_DEPLOYMENT_TARGET="$IPHONEOS_DEPLOYMENT_TARGET" \
+              -DCMAKE_C_COMPILER="$cc_wrapper" \
+              -DCMAKE_C_COMPILER_TARGET="$target" \
+              -DCMAKE_C_FLAGS="-target $target -isysroot $sysroot $minflag -fPIC -O2" \
+              -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+              -DCMAKE_AR="$ar" \
+              -DCMAKE_RANLIB="$ranlib" \
+              -DBUILD_SHARED_LIBS=OFF
+            cmake --build "$build_root/gklib" --target install -j"$(sysctl -n hw.ncpu)"
+
+            cmake -S "$work/src/metis" -B "$build_root/metis" -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_INSTALL_PREFIX="$prefix" \
+              -DCMAKE_SYSTEM_NAME=iOS \
+              -DCMAKE_OSX_SYSROOT="$sysroot" \
+              -DCMAKE_OSX_ARCHITECTURES=arm64 \
+              -DCMAKE_OSX_DEPLOYMENT_TARGET="$IPHONEOS_DEPLOYMENT_TARGET" \
+              -DCMAKE_C_COMPILER="$cc_wrapper" \
+              -DCMAKE_C_COMPILER_TARGET="$target" \
+              -DCMAKE_C_FLAGS="-target $target -isysroot $sysroot $minflag -fPIC -O2 -I$prefix/include" \
+              -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+              -DCMAKE_AR="$ar" \
+              -DCMAKE_RANLIB="$ranlib" \
+              -DBUILD_SHARED_LIBS=OFF \
+              -DGKLIB_PATH="$work/src/metis/GKlib" \
+              -DSHARED=OFF
+            cmake --build "$build_root/metis" --target install -j"$(sysctl -n hw.ncpu)"
+
+            cat > "$build_root/spral-cross.ini" <<EOF
+          [binaries]
+          c = '$cc_wrapper'
+          cpp = '$cxx_wrapper'
+          fortran = '$fc_wrapper'
+          ar = '$ar'
+          strip = '$(xcrun --sdk "$sdk" --find strip)'
+          pkgconfig = 'pkg-config'
+
+          [properties]
+          needs_exe_wrapper = true
+          c_args = ['-target', '$target', '-isysroot', '$sysroot', '$minflag', '-fPIC', '-O2', '-I$prefix/include']
+          cpp_args = ['-target', '$target', '-isysroot', '$sysroot', '$minflag', '-fPIC', '-O2', '-stdlib=libc++', '-I$prefix/include']
+          fortran_args = ['-target', '$target', '-isysroot', '$sysroot', '-fPIC', '-O2', '-J$build_root/spral-modules']
+          c_link_args = ['-target', '$target', '-isysroot', '$sysroot', '$minflag']
+          cpp_link_args = ['-target', '$target', '-isysroot', '$sysroot', '$minflag', '-stdlib=libc++']
+          fortran_link_args = ['-target', '$target', '-isysroot', '$sysroot']
+
+          [host_machine]
+          system = 'darwin'
+          cpu_family = 'aarch64'
+          cpu = 'arm64'
+          endian = 'little'
+          EOF
+
+            mkdir -p "$build_root/spral-modules"
+            meson setup "$build_root/spral" "$work/src/spral" \
+              --cross-file "$build_root/spral-cross.ini" \
+              --prefix "$prefix" \
+              --libdir lib \
+              --default-library static \
+              -Dgpu=false \
+              -Dexamples=false \
+              -Dtests=false \
+              -Dbinaries=false \
+              -Dopenmp=false \
+              -Dlibblas=Accelerate \
+              -Dliblapack=Accelerate \
+              -Dlibmetis=metis \
+              -Dlibmetis_path="$prefix/lib" \
+              -Dlibhwloc=hwloc \
+              -Dlibhwloc_path="$prefix/lib"
+            meson compile -C "$build_root/spral"
+            meson install -C "$build_root/spral"
+
+            mkdir -p "$prefix/logs"
+            find "$prefix" -maxdepth 4 -type f | sort | tee "$prefix/logs/spral-files.txt"
+            test -f "$prefix/lib/libspral.a"
+            test -f "$prefix/lib/libmetis.a"
+            test -f "$prefix/lib/libGKlib.a"
+            xcrun nm -g "$prefix/lib/libspral.a" > "$prefix/logs/libspral-nm.txt"
+            grep -i 'spral' "$prefix/logs/libspral-nm.txt"
+          }
+
+          build_one_slice "ios-arm64" "iphoneos" "arm64-apple-ios${IPHONEOS_DEPLOYMENT_TARGET}" "-miphoneos-version-min=${IPHONEOS_DEPLOYMENT_TARGET}"
+          build_one_slice "ios-arm64-simulator" "iphonesimulator" "arm64-apple-ios${IPHONEOS_DEPLOYMENT_TARGET}-simulator" "-mios-simulator-version-min=${IPHONEOS_DEPLOYMENT_TARGET}"
+
+      - name: Build IPOPT static with SPRAL
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          work="$RUNNER_TEMP/rlc-ios-spral-proof"
+          llvm_root="${NATIVE_ROOT}/llvm-${LLVM_TAG}"
+          flang="$llvm_root/install-host/bin/flang"
+          flang_intrinsic_modules="$llvm_root/install-host/include/flang"
+          ipopt_src="$(find "$work/src" -maxdepth 1 -type d \( -name 'coinor-ipopt-*' -o -name 'Ipopt-*' \) | head -n 1)"
+
+          if [[ -z "$ipopt_src" ]]; then
+            echo "::error::IPOPT source directory not found."
+            find "$work/src" -maxdepth 2 -print
+            exit 1
+          fi
+
+          make_flang_wrapper() {
+            local wrapper="$1"
+            mkdir -p "$(dirname "$wrapper")"
+            cat > "$wrapper" <<EOF
+          #!/usr/bin/env bash
+          set -euo pipefail
+          args=()
+          skip_next=0
+          for arg in "\$@"; do
+            if [[ "\$skip_next" == 1 ]]; then
+              skip_next=0
+              continue
+            fi
+            case "\$arg" in
+              -mmacosx-version-min=*|-miphoneos-version-min=*|-mios-simulator-version-min=*) ;;
+              -arch) skip_next=1 ;;
+              *) args+=("\$arg") ;;
+            esac
+          done
+          exec "$flang" -fintrinsic-modules-path "$flang_intrinsic_modules" "\${args[@]}"
+          EOF
+            chmod +x "$wrapper"
+          }
+
+          find_flang_rt() {
+            local name="$1"
+            local runtime
+            runtime="$(find "$llvm_root/install-flangrt-${name}" -type f -name 'libflang_rt.runtime.a' -print | head -n 1)"
+            if [[ -z "$runtime" ]]; then
+              echo "::error::libflang_rt.runtime.a not found for $name."
+              find "$llvm_root/install-flangrt-${name}" -type f -print || true
+              exit 1
+            fi
+            echo "$runtime"
+          }
+
+          flatten_archive_no_nested() {
+            local input="$1"
+            local output="$2"
+            local removed="$3"
+            local tmp
+            tmp="$(mktemp -d)"
+            (
+              cd "$tmp"
+              ar -x "$input"
+              find . -maxdepth 1 -type f -name '*.a' -print | sort > "$removed"
+              find . -maxdepth 1 -type f -name '*.a' -delete
+              /usr/bin/ar -crs "$output" ./*.o
+              /usr/bin/ranlib "$output"
+            )
+            rm -rf "$tmp"
+          }
+
+          build_one_slice() {
+            local name="$1"
+            local sdk="$2"
+            local target="$3"
+            local minflag="$4"
+
+            local sysroot
+            local build_dir
+            local install_dir
+            local spral_dir
+            local fc_wrapper
+            local ar
+            local ranlib
+            local cc
+            local cxx
+            local flang_rt
+
+            sysroot="$(xcrun --sdk "$sdk" --show-sdk-path)"
+            ar="$(xcrun --sdk "$sdk" --find ar)"
+            ranlib="$(xcrun --sdk "$sdk" --find ranlib)"
+            cc="$(xcrun --sdk "$sdk" --find clang)"
+            cxx="$(xcrun --sdk "$sdk" --find clang++)"
+            build_dir="$work/build/ipopt-${name}"
+            install_dir="$work/artifacts/ipopt/${name}"
+            spral_dir="$work/artifacts/spral/${name}"
+            fc_wrapper="$work/wrappers/${name}/flang-wrapper.sh"
+            flang_rt="$(find_flang_rt "$name")"
+
+            rm -rf "$build_dir" "$install_dir"
+            mkdir -p "$build_dir" "$install_dir" "$(dirname "$fc_wrapper")"
+            make_flang_wrapper "$fc_wrapper"
+
+            (
+              cd "$build_dir"
+              export CC="$cc"
+              export CXX="$cxx"
+              export FC="$fc_wrapper"
+              export F77="$fc_wrapper"
+              export AR="$ar"
+              export RANLIB="$ranlib"
+              export CFLAGS="-target $target -isysroot $sysroot $minflag -fPIC -O2 -I$spral_dir/include"
+              export CXXFLAGS="-target $target -isysroot $sysroot $minflag -fPIC -O2 -stdlib=libc++ -I$spral_dir/include"
+              export FCFLAGS="-target $target -isysroot $sysroot -fPIC -O2"
+              export FFLAGS="$FCFLAGS"
+              export LDFLAGS="-target $target -isysroot $sysroot $minflag"
+              export FLIBS="$flang_rt"
+              export ac_cv_f77_libs="$flang_rt"
+              export ac_cv_f77_dummy_main=none
+              export ac_cv_fortran_dummy_main=none
+              export ac_cv_func_malloc_0_nonnull=yes
+              export ac_cv_func_realloc_0_nonnull=yes
+              export coin_cv_f77_mangling='lowercase-underscore'
+              "$ipopt_src/configure" \
+                --host="$host" \
+                --build="$(sh "$ipopt_src/config.guess")" \
+                --prefix="$install_dir" \
+                --disable-shared \
+                --enable-static \
+                --disable-dependency-linking \
+                --disable-linear-solver-loader \
+                --without-asl \
+                --disable-java \
+                --without-mumps \
+                --without-hsl \
+                --without-mkl \
+                --without-pardiso \
+                --without-pardisomkl \
+                --with-blas="-framework Accelerate" \
+                --with-lapack="-framework Accelerate" \
+                --with-spral-cflags="-I$spral_dir/include" \
+                --with-spral-lflags="${spral_dir}/lib/libspral.a ${spral_dir}/lib/libmetis.a ${spral_dir}/lib/libGKlib.a ${flang_rt} -framework Accelerate -lc++ -lm" \
+                > "$install_dir-config.log" 2>&1
+              make -j"$(sysctl -n hw.ncpu)" > "$install_dir-build.log" 2>&1
+              make install > "$install_dir-install.log" 2>&1
+            )
+
+            mkdir -p "$install_dir/logs"
+            cp "$install_dir-config.log" "$install_dir/logs/ipopt-config.log"
+            cp "$install_dir-build.log" "$install_dir/logs/ipopt-build.log"
+            cp "$install_dir-install.log" "$install_dir/logs/ipopt-install.log"
+
+            local libipopt
+            libipopt="$(find "$install_dir" -type f -name 'libipopt.a' -print | head -n 1)"
+            test -n "$libipopt"
+            flatten_archive_no_nested "$libipopt" "$install_dir/libipopt-flat.a" "$install_dir/logs/libipopt-removed-nested-archives.txt"
+            mv "$install_dir/libipopt-flat.a" "$install_dir/lib/libipopt.a"
+            xcrun nm -g "$install_dir/lib/libipopt.a" > "$install_dir/logs/libipopt-nm.txt"
+            grep '_CreateIpoptProblem' "$install_dir/logs/libipopt-nm.txt"
+            grep -i 'spral' "$install_dir/logs/libipopt-nm.txt"
+            if grep -i 'mumps' "$install_dir/logs/libipopt-nm.txt"; then
+              echo "::error::SPRAL-only IPOPT unexpectedly contains MUMPS symbols for ${name}."
+              exit 1
+            fi
+          }
+
+          build_one_slice "ios-arm64" "iphoneos" "arm64-apple-ios${IPHONEOS_DEPLOYMENT_TARGET}" "-miphoneos-version-min=${IPHONEOS_DEPLOYMENT_TARGET}" "arm-apple-darwin"
+          build_one_slice "ios-arm64-simulator" "iphonesimulator" "arm64-apple-ios${IPHONEOS_DEPLOYMENT_TARGET}-simulator" "-mios-simulator-version-min=${IPHONEOS_DEPLOYMENT_TARGET}" "arm64-apple-darwin"
+
+      - name: Package and audit reusable native deps
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          work="$RUNNER_TEMP/rlc-ios-spral-proof"
+          llvm_root="${NATIVE_ROOT}/llvm-${LLVM_TAG}"
+          native_deps="$work/artifacts/native-deps"
+          mkdir -p "$native_deps"
+
+          find_flang_rt() {
+            local name="$1"
+            local runtime
+            runtime="$(find "$llvm_root/install-flangrt-${name}" -type f -name 'libflang_rt.runtime.a' -print | head -n 1)"
+            if [[ -z "$runtime" ]]; then
+              echo "::error::libflang_rt.runtime.a not found for $name."
+              exit 1
+            fi
+            echo "$runtime"
+          }
+
+          package_one_slice() {
+            local name="$1"
+            local sdk="$2"
+            local target="$3"
+            local minflag="$4"
+
+            local deps_dir="$native_deps/${name}"
+            local ipopt_dir="$work/artifacts/ipopt/${name}"
+            local spral_dir="$work/artifacts/spral/${name}"
+            local flang_rt
+            local sysroot
+
+            flang_rt="$(find_flang_rt "$name")"
+            sysroot="$(xcrun --sdk "$sdk" --show-sdk-path)"
+
+            rm -rf "$deps_dir"
+            mkdir -p "$deps_dir/lib" "$deps_dir/include" "$deps_dir/logs"
+            cp "$ipopt_dir/lib/libipopt.a" "$deps_dir/lib/libipopt.a"
+            cp "$spral_dir/lib/libspral.a" "$deps_dir/lib/libspral.a"
+            cp "$spral_dir/lib/libmetis.a" "$deps_dir/lib/libmetis.a"
+            cp "$spral_dir/lib/libGKlib.a" "$deps_dir/lib/libGKlib.a"
+            cp "$flang_rt" "$deps_dir/lib/libflang_rt.runtime.a"
+            cp -R "$ipopt_dir/include/coin-or" "$deps_dir/include/coin-or"
+            cp -R "$spral_dir/include"/* "$deps_dir/include/" || true
+            cp -R "$ipopt_dir/logs"/* "$deps_dir/logs/"
+            cp -R "$spral_dir/logs"/* "$deps_dir/logs/"
+
+            cat > "$deps_dir/manifest.json" <<EOF
+          {
+            "schema_version": "rlc_ios_native_deps.v1",
+            "linear_solver_backend": "spral",
+            "platform": "${name}",
+            "deployment_target": "${IPHONEOS_DEPLOYMENT_TARGET}",
+            "ipopt_version": "${IPOPT_VERSION}",
+            "spral_tag": "${SPRAL_TAG}",
+            "metis_tag": "${METIS_TAG}",
+            "gklib_ref": "${GKLIB_REF}",
+            "libraries": [
+              "libipopt.a",
+              "libspral.a",
+              "libmetis.a",
+              "libGKlib.a",
+              "libflang_rt.runtime.a"
+            ],
+            "headers": [
+              "coin-or/IpStdCInterface.h"
+            ],
+            "system_link_deps": [
+              "Accelerate.framework",
+              "libc++",
+              "libm"
+            ]
+          }
+          EOF
+
+            find "$deps_dir" -type f -name '*.dylib' -o -name '*.so' -o -name '*.dll' | tee "$deps_dir/logs/forbidden-dynamic-libs.txt"
+            if [[ -s "$deps_dir/logs/forbidden-dynamic-libs.txt" ]]; then
+              echo "::error::Forbidden dynamic library found in SPRAL iOS native deps."
+              exit 1
+            fi
+
+            xcrun nm -g "$deps_dir/lib/libipopt.a" > "$deps_dir/logs/libipopt-nm.txt"
+            xcrun nm -g "$deps_dir/lib/libspral.a" > "$deps_dir/logs/libspral-nm.txt"
+            grep '_CreateIpoptProblem' "$deps_dir/logs/libipopt-nm.txt"
+            grep -i 'spral' "$deps_dir/logs/libspral-nm.txt"
+            if grep -i 'mumps' "$deps_dir/logs/libipopt-nm.txt" "$deps_dir/logs/libspral-nm.txt"; then
+              echo "::error::SPRAL-only native deps contain MUMPS symbols."
+              exit 1
+            fi
+
+            cat > "$deps_dir/logs/rlc_ipopt_smoke.cpp" <<'EOF'
+          #include <coin-or/IpStdCInterface.h>
+          extern "C" void *rlc_touch_ipopt(void) {
+            return (void *)&CreateIpoptProblem;
+          }
+          int main(void) {
+            return rlc_touch_ipopt() == 0;
+          }
+          EOF
+
+            xcrun --sdk "$sdk" clang++ \
+              -target "$target" \
+              -isysroot "$sysroot" \
+              "$minflag" \
+              -I"$deps_dir/include" \
+              "$deps_dir/logs/rlc_ipopt_smoke.cpp" \
+              -Wl,-undefined,error \
+              -Wl,-force_load,"$deps_dir/lib/libipopt.a" \
+              -Wl,-force_load,"$deps_dir/lib/libspral.a" \
+              -Wl,-force_load,"$deps_dir/lib/libmetis.a" \
+              -Wl,-force_load,"$deps_dir/lib/libGKlib.a" \
+              -Wl,-force_load,"$deps_dir/lib/libflang_rt.runtime.a" \
+              -framework Accelerate \
+              -lc++ \
+              -lm \
+              -o "$deps_dir/logs/rlc_ipopt_smoke" \
+              > "$deps_dir/logs/ipopt-link-smoke.log" 2>&1
+
+            otool -L "$deps_dir/logs/rlc_ipopt_smoke" > "$deps_dir/logs/ipopt-link-smoke-otool.txt"
+            nm -u "$deps_dir/logs/rlc_ipopt_smoke" > "$deps_dir/logs/ipopt-link-smoke-undefined.txt" || true
+            if grep -E '(_mpi_|__FortranA|mumps|dmumps)' "$deps_dir/logs/ipopt-link-smoke-undefined.txt"; then
+              echo "::error::Unresolved MUMPS/MPI/Flang symbols remain in SPRAL ${name} smoke binary."
+              exit 1
+            fi
+            if grep -E '/opt/homebrew|libflang|Fortran|LLVM|gfortran' "$deps_dir/logs/ipopt-link-smoke-otool.txt"; then
+              echo "::error::Forbidden Homebrew/macOS/Fortran dylib dependency in SPRAL ${name} smoke binary."
+              exit 1
+            fi
+            xcrun vtool -show-build "$deps_dir/logs/rlc_ipopt_smoke" | tee "$deps_dir/logs/ipopt-link-smoke-vtool.txt"
+          }
+
+          package_one_slice "ios-arm64" "iphoneos" "arm64-apple-ios${IPHONEOS_DEPLOYMENT_TARGET}" "-miphoneos-version-min=${IPHONEOS_DEPLOYMENT_TARGET}"
+          package_one_slice "ios-arm64-simulator" "iphonesimulator" "arm64-apple-ios${IPHONEOS_DEPLOYMENT_TARGET}-simulator" "-mios-simulator-version-min=${IPHONEOS_DEPLOYMENT_TARGET}"
+
+          mkdir -p "$native_deps/LICENSES"
+          cp "$work/src/spral/LICENCE" "$native_deps/LICENSES/SPRAL-LICENCE"
+          cp "$work/src/metis/LICENSE.txt" "$native_deps/LICENSES/METIS-LICENSE.txt"
+          cp "$work/src/metis/GKlib/LICENSE.txt" "$native_deps/LICENSES/GKLIB-LICENSE.txt"
+          cat > "$native_deps/manifest.json" <<EOF
+          {
+            "schema_version": "rlc_ios_native_deps_bundle.v1",
+            "linear_solver_backend": "spral",
+            "artifact": "${NATIVE_DEPS_ARTIFACT}",
+            "llvm_tag": "${LLVM_TAG}",
+            "deployment_target": "${IPHONEOS_DEPLOYMENT_TARGET}",
+            "ipopt_version": "${IPOPT_VERSION}",
+            "spral_tag": "${SPRAL_TAG}",
+            "metis_tag": "${METIS_TAG}",
+            "gklib_ref": "${GKLIB_REF}",
+            "slices": [
+              "ios-arm64",
+              "ios-arm64-simulator"
+            ],
+            "libraries": [
+              "libipopt.a",
+              "libspral.a",
+              "libmetis.a",
+              "libGKlib.a",
+              "libflang_rt.runtime.a"
+            ],
+            "system_link_deps": [
+              "Accelerate.framework",
+              "libc++",
+              "libm"
+            ]
+          }
+          EOF
+
+          mkdir -p "$work/artifacts/dist"
+          (
+            cd "$work/artifacts"
+            tar -czf "dist/${NATIVE_DEPS_ARTIFACT}.tar.gz" native-deps
+          )
+          shasum -a 256 "$work/artifacts/dist/${NATIVE_DEPS_ARTIFACT}.tar.gz" > "$work/artifacts/dist/${NATIVE_DEPS_ARTIFACT}.tar.gz.sha256"
+          cat "$work/artifacts/dist/${NATIVE_DEPS_ARTIFACT}.tar.gz.sha256"
+
+      - name: Upload SPRAL proof artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-spral-proof-output
+          path: ${{ runner.temp }}/rlc-ios-spral-proof/artifacts
+          retention-days: 1
