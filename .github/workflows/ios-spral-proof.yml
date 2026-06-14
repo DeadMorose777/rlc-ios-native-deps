@@ -313,7 +313,11 @@ jobs:
           if [[ "\$compile_only" == 0 && -n "\${RLC_APPLE_COMPILER_RT_LIB:-}" ]]; then
             link_args+=("-Wl,-force_load,\${RLC_APPLE_COMPILER_RT_LIB}")
           fi
-          exec "$flang" -fintrinsic-modules-path "$flang_intrinsic_modules" "\${args[@]}" "\${link_args[@]}"
+          cmd=("$flang" -fintrinsic-modules-path "$flang_intrinsic_modules" "\${args[@]}")
+          if (( \${#link_args[@]} > 0 )); then
+            cmd+=("\${link_args[@]}")
+          fi
+          exec "\${cmd[@]}"
           EOF
             chmod +x "$wrapper"
           }
@@ -529,7 +533,11 @@ jobs:
           if [[ "\$compile_only" == 0 && -n "\${RLC_APPLE_COMPILER_RT_LIB:-}" ]]; then
             link_args+=("-Wl,-force_load,\${RLC_APPLE_COMPILER_RT_LIB}")
           fi
-          exec "$flang" -fintrinsic-modules-path "$flang_intrinsic_modules" "\${args[@]}" "\${link_args[@]}"
+          cmd=("$flang" -fintrinsic-modules-path "$flang_intrinsic_modules" "\${args[@]}")
+          if (( \${#link_args[@]} > 0 )); then
+            cmd+=("\${link_args[@]}")
+          fi
+          exec "\${cmd[@]}"
           EOF
             chmod +x "$wrapper"
           }
