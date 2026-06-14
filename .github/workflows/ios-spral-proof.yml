@@ -137,6 +137,8 @@ jobs:
           git clone --depth 1 --branch "$SPRAL_TAG" https://github.com/ralna/spral.git "$work/src/spral"
           git clone --depth 1 --branch "$METIS_TAG" https://github.com/KarypisLab/METIS.git "$work/src/metis"
           git clone --depth 1 --branch "$GKLIB_REF" https://github.com/KarypisLab/GKlib.git "$work/src/metis/GKlib"
+          perl -0pi -e "s/# Binary\\nexecutable\\('spral_ssids',\\n           sources : binspral_src,\\n           dependencies : libcuda,\\n           link_with : libspral,\\n           install : true\\)\\n//s" "$work/src/spral/meson.build"
+          grep -n "spral_ssids" "$work/src/spral/meson.build" && exit 1 || true
           mkdir -p "$work/src/metis/build/xinclude"
           {
             echo '#define IDXTYPEWIDTH 32'
@@ -318,7 +320,6 @@ jobs:
               -Dgpu=false \
               -Dexamples=false \
               -Dtests=false \
-              -Dbinaries=false \
               -Dopenmp=false \
               -Dlibblas=Accelerate \
               -Dliblapack=Accelerate \
