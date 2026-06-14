@@ -188,10 +188,19 @@ jobs:
             local tmp
             local cc
             local ar_tool
+            local apple_suffix
+            local apple_runtime
+            local apple_runtime_dir
 
             case "$name" in
-              ios-arm64) suffix="runtime_ios" ;;
-              ios-arm64-simulator) suffix="runtime_iossim" ;;
+              ios-arm64)
+                suffix="runtime_ios"
+                apple_suffix="ios"
+                ;;
+              ios-arm64-simulator)
+                suffix="runtime_iossim"
+                apple_suffix="iossim"
+                ;;
               *) echo "::error::Unknown iOS slice for Flang runtime stub: $name"; exit 1 ;;
             esac
 
@@ -204,9 +213,16 @@ jobs:
             tmp="$(mktemp -d)"
             cc="$(xcrun --sdk "$sdk" --find clang)"
             ar_tool="$(xcrun --sdk "$sdk" --find ar)"
-            echo 'int rlc_empty_clang_runtime_stub = 0;' > "$tmp/empty.c"
-            "$cc" -target "$target" -isysroot "$(xcrun --sdk "$sdk" --show-sdk-path)" -c "$tmp/empty.c" -o "$tmp/empty.o"
-            "$ar_tool" -crs "$runtime_dir/libclang_rt.${suffix}.a" "$tmp/empty.o"
+            apple_runtime_dir="$("$cc" -print-resource-dir)/lib/darwin"
+            apple_runtime="$apple_runtime_dir/libclang_rt.${apple_suffix}.a"
+            if [[ -f "$apple_runtime" ]]; then
+              cp "$apple_runtime" "$runtime_dir/libclang_rt.${suffix}.a"
+            else
+              echo "::warning::Apple compiler runtime not found at $apple_runtime; creating empty Flang driver placeholder."
+              echo 'int rlc_empty_clang_runtime_stub = 0;' > "$tmp/empty.c"
+              "$cc" -target "$target" -isysroot "$(xcrun --sdk "$sdk" --show-sdk-path)" -c "$tmp/empty.c" -o "$tmp/empty.o"
+              "$ar_tool" -crs "$runtime_dir/libclang_rt.${suffix}.a" "$tmp/empty.o"
+            fi
             rm -rf "$tmp"
           }
 
