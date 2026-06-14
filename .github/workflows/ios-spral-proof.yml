@@ -179,6 +179,18 @@ jobs:
             echo "$runtime"
           }
 
+          find_flang_module_builtins() {
+            local name="$1"
+            local runtime
+            runtime="$work/artifacts/flang-modules/${name}/lib/libflang_module_builtins.a"
+            if [[ ! -f "$runtime" ]]; then
+              echo "::error::libflang_module_builtins.a not found for $name."
+              find "$work/artifacts/flang-modules" -type f -print || true
+              exit 1
+            fi
+            echo "$runtime"
+          }
+
           find_apple_compiler_runtime() {
             local name="$1"
             local sdk="$2"
@@ -348,6 +360,38 @@ jobs:
             chmod +x "$wrapper"
           }
 
+          build_flang_module_builtins() {
+            local name="$1"
+            local sdk="$2"
+            local target="$3"
+            local minflag="$4"
+            local fc_wrapper="$5"
+            local ar="$6"
+            local ranlib="$7"
+
+            local out_dir="$work/artifacts/flang-modules/${name}/lib"
+            local build_dir="$work/build/${name}/flang-module-builtins"
+            local sysroot
+
+            sysroot="$(xcrun --sdk "$sdk" --show-sdk-path)"
+            mkdir -p "$out_dir" "$build_dir"
+
+            "$fc_wrapper" \
+              -target "$target" \
+              -isysroot "$sysroot" \
+              "$minflag" \
+              -cpp \
+              -fPIC \
+              -O2 \
+              -c "$llvm_root/src/flang/module/__fortran_builtins.f90" \
+              -o "$build_dir/__fortran_builtins.o"
+
+            "$ar" -crs "$out_dir/libflang_module_builtins.a" "$build_dir/__fortran_builtins.o"
+            "$ranlib" "$out_dir/libflang_module_builtins.a"
+            xcrun nm -g "$out_dir/libflang_module_builtins.a" > "$out_dir/libflang_module_builtins-nm.txt"
+            grep '__QM__fortran_builtinsPc_associated_c_ptr' "$out_dir/libflang_module_builtins-nm.txt"
+          }
+
           build_one_slice() {
             local name="$1"
             local sdk="$2"
@@ -387,6 +431,7 @@ jobs:
             make_clang_wrapper "$cc_wrapper" "$(xcrun --sdk "$sdk" --find clang)"
             make_clang_wrapper "$cxx_wrapper" "$(xcrun --sdk "$sdk" --find clang++)"
             make_flang_wrapper "$fc_wrapper"
+            build_flang_module_builtins "$name" "$sdk" "$target" "$minflag" "$fc_wrapper" "$ar" "$ranlib"
 
             cmake -S "$work/src/metis/GKlib" -B "$build_root/gklib" -G Ninja \
               -DCMAKE_BUILD_TYPE=Release \
@@ -618,6 +663,7 @@ jobs:
             local cc
             local cxx
             local flang_rt
+            local flang_builtins
             local flang_rt_dir
             local apple_compiler_rt
 
@@ -631,6 +677,7 @@ jobs:
             spral_dir="$work/artifacts/spral/${name}"
             fc_wrapper="$work/wrappers/${name}/flang-wrapper.sh"
             flang_rt="$(find_flang_rt "$name")"
+            flang_builtins="$(find_flang_module_builtins "$name")"
             flang_rt_dir="$(dirname "$flang_rt")"
             apple_compiler_rt="$(find_apple_compiler_runtime "$name" "$sdk")"
 
@@ -640,7 +687,7 @@ jobs:
 
             (
               cd "$build_dir"
-              spral_lflags="-Wl,-force_load,${spral_dir}/lib/libspral.a -Wl,-force_load,${spral_dir}/lib/libmetis.a -Wl,-force_load,${spral_dir}/lib/libGKlib.a -Wl,-force_load,${flang_rt} -Wl,-force_load,${apple_compiler_rt} -framework Accelerate -lc++ -lm"
+              spral_lflags="-Wl,-force_load,${spral_dir}/lib/libspral.a -Wl,-force_load,${flang_builtins} -Wl,-force_load,${spral_dir}/lib/libmetis.a -Wl,-force_load,${spral_dir}/lib/libGKlib.a -Wl,-force_load,${flang_rt} -Wl,-force_load,${apple_compiler_rt} -framework Accelerate -lc++ -lm"
               export CC="$cc"
               export CXX="$cxx"
               export FC="$fc_wrapper"
@@ -722,12 +769,52 @@ jobs:
           native_deps="$work/artifacts/native-deps"
           mkdir -p "$native_deps"
 
+          find_apple_compiler_runtime() {
+            local name="$1"
+            local sdk="$2"
+            local apple_suffix
+            local cc
+            local runtime_dir
+            local runtime
+
+            case "$name" in
+              ios-arm64) apple_suffix="ios" ;;
+              ios-arm64-simulator) apple_suffix="iossim" ;;
+              *) echo "::error::Unknown iOS slice for Apple compiler runtime: $name"; exit 1 ;;
+            esac
+
+            cc="$(xcrun --sdk "$sdk" --find clang)"
+            runtime_dir="$("$cc" -print-resource-dir)/lib/darwin"
+            runtime="$runtime_dir/libclang_rt.${apple_suffix}.a"
+            if [[ ! -f "$runtime" ]]; then
+              echo "::warning::Apple compiler runtime not found at $runtime" >&2
+              echo "::warning::Available Darwin compiler runtimes:" >&2
+              find "$runtime_dir" -maxdepth 1 -type f -name 'libclang_rt*.a' -print | sort >&2 || true
+              echo ""
+              return
+            fi
+
+            echo "$runtime"
+          }
+
           find_flang_rt() {
             local name="$1"
             local runtime
             runtime="$(find "$llvm_root/install-flangrt-${name}" -type f -name 'libflang_rt.runtime.a' -print | head -n 1)"
             if [[ -z "$runtime" ]]; then
               echo "::error::libflang_rt.runtime.a not found for $name."
+              exit 1
+            fi
+            echo "$runtime"
+          }
+
+          find_flang_module_builtins() {
+            local name="$1"
+            local runtime
+            runtime="$work/artifacts/flang-modules/${name}/lib/libflang_module_builtins.a"
+            if [[ ! -f "$runtime" ]]; then
+              echo "::error::libflang_module_builtins.a not found for $name."
+              find "$work/artifacts/flang-modules" -type f -print || true
               exit 1
             fi
             echo "$runtime"
@@ -743,10 +830,12 @@ jobs:
             local ipopt_dir="$work/artifacts/ipopt/${name}"
             local spral_dir="$work/artifacts/spral/${name}"
             local flang_rt
+            local flang_builtins
             local apple_compiler_rt
             local sysroot
 
             flang_rt="$(find_flang_rt "$name")"
+            flang_builtins="$(find_flang_module_builtins "$name")"
             apple_compiler_rt="$(find_apple_compiler_runtime "$name" "$sdk")"
             sysroot="$(xcrun --sdk "$sdk" --show-sdk-path)"
 
@@ -756,6 +845,7 @@ jobs:
             cp "$spral_dir/lib/libspral.a" "$deps_dir/lib/libspral.a"
             cp "$spral_dir/lib/libmetis.a" "$deps_dir/lib/libmetis.a"
             cp "$spral_dir/lib/libGKlib.a" "$deps_dir/lib/libGKlib.a"
+            cp "$flang_builtins" "$deps_dir/lib/libflang_module_builtins.a"
             cp "$flang_rt" "$deps_dir/lib/libflang_rt.runtime.a"
             cp -R "$ipopt_dir/include/coin-or" "$deps_dir/include/coin-or"
             cp -R "$spral_dir/include"/* "$deps_dir/include/" || true
@@ -775,6 +865,7 @@ jobs:
             "libraries": [
               "libipopt.a",
               "libspral.a",
+              "libflang_module_builtins.a",
               "libmetis.a",
               "libGKlib.a",
               "libflang_rt.runtime.a"
@@ -798,8 +889,10 @@ jobs:
 
             xcrun nm -g "$deps_dir/lib/libipopt.a" > "$deps_dir/logs/libipopt-nm.txt"
             xcrun nm -g "$deps_dir/lib/libspral.a" > "$deps_dir/logs/libspral-nm.txt"
+            xcrun nm -g "$deps_dir/lib/libflang_module_builtins.a" > "$deps_dir/logs/libflang-module-builtins-nm.txt"
             grep '_CreateIpoptProblem' "$deps_dir/logs/libipopt-nm.txt"
             grep -i 'spral' "$deps_dir/logs/libspral-nm.txt"
+            grep '__QM__fortran_builtinsPc_associated_c_ptr' "$deps_dir/logs/libflang-module-builtins-nm.txt"
             if grep -i 'mumps' "$deps_dir/logs/libipopt-nm.txt" "$deps_dir/logs/libspral-nm.txt"; then
               echo "::error::SPRAL-only native deps contain MUMPS symbols."
               exit 1
@@ -829,6 +922,7 @@ jobs:
               -Wl,-undefined,error \
               -Wl,-force_load,"$deps_dir/lib/libipopt.a" \
               -Wl,-force_load,"$deps_dir/lib/libspral.a" \
+              -Wl,-force_load,"$deps_dir/lib/libflang_module_builtins.a" \
               -Wl,-force_load,"$deps_dir/lib/libmetis.a" \
               -Wl,-force_load,"$deps_dir/lib/libGKlib.a" \
               -Wl,-force_load,"$deps_dir/lib/libflang_rt.runtime.a" \
@@ -859,6 +953,7 @@ jobs:
           cp "$work/src/spral/LICENCE" "$native_deps/LICENSES/SPRAL-LICENCE"
           cp "$work/src/metis/LICENSE.txt" "$native_deps/LICENSES/METIS-LICENSE.txt"
           cp "$work/src/metis/GKlib/LICENSE.txt" "$native_deps/LICENSES/GKLIB-LICENSE.txt"
+          cp "$llvm_root/src/llvm/LICENSE.TXT" "$native_deps/LICENSES/LLVM-LICENSE.txt"
           cat > "$native_deps/manifest.json" <<EOF
           {
             "schema_version": "rlc_ios_native_deps_bundle.v1",
@@ -877,6 +972,7 @@ jobs:
             "libraries": [
               "libipopt.a",
               "libspral.a",
+              "libflang_module_builtins.a",
               "libmetis.a",
               "libGKlib.a",
               "libflang_rt.runtime.a"
