@@ -232,10 +232,11 @@ jobs:
               *) args+=("\$arg") ;;
             esac
           done
+          if [[ "\$compile_only" == 0 && -n "\${RLC_FLANG_RT_DIR:-}" ]]; then
+            link_args+=("-L\${RLC_FLANG_RT_DIR}")
+          fi
           if [[ "\$compile_only" == 0 && -n "\${RLC_FLANG_RT_LIB:-}" ]]; then
             link_args+=("-Wl,-force_load,\${RLC_FLANG_RT_LIB}")
-          elif [[ "\$compile_only" == 0 && -n "\${RLC_FLANG_RT_DIR:-}" ]]; then
-            link_args+=("-L\${RLC_FLANG_RT_DIR}" "-static-libflangrt")
           fi
           exec "$flang" -fintrinsic-modules-path "$flang_intrinsic_modules" "\${args[@]}" "\${link_args[@]}"
           EOF
@@ -358,7 +359,7 @@ jobs:
           fortran_args = ['-target', '$target', '-isysroot', '$sysroot', '-fPIC', '-O2', '-J$build_root/spral-modules']
           c_link_args = ['-target', '$target', '-isysroot', '$sysroot', '$minflag']
           cpp_link_args = ['-target', '$target', '-isysroot', '$sysroot', '$minflag', '-stdlib=libc++']
-          fortran_link_args = ['-target', '$target', '-isysroot', '$sysroot', '-Wl,-force_load,$flang_rt']
+          fortran_link_args = ['-target', '$target', '-isysroot', '$sysroot', '-L$flang_rt_dir']
 
           [host_machine]
           system = 'darwin'
