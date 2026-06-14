@@ -376,22 +376,67 @@ jobs:
             sysroot="$(xcrun --sdk "$sdk" --show-sdk-path)"
             mkdir -p "$out_dir" "$build_dir"
 
+            cat > "$build_dir/rlc_flang_module_builtins.f90" <<'EOF'
+          module __fortran_builtins
+            intrinsic :: selected_int_kind
+            integer, parameter :: int64 = selected_int_kind(18)
+
+            type, bind(c), public :: __builtin_c_ptr
+              integer(kind=int64), private :: __address
+            end type
+
+            type, bind(c), public :: __builtin_c_funptr
+              integer(kind=int64), private :: __address
+            end type
+
+          contains
+            pure logical function c_associated_c_ptr(c_ptr_1, c_ptr_2)
+              type(__builtin_c_ptr), intent(in) :: c_ptr_1
+              type(__builtin_c_ptr), intent(in), optional :: c_ptr_2
+
+              if (c_ptr_1%__address == 0) then
+                c_associated_c_ptr = .false.
+              else if (present(c_ptr_2)) then
+                c_associated_c_ptr = c_ptr_1%__address == c_ptr_2%__address
+              else
+                c_associated_c_ptr = .true.
+              end if
+            end function c_associated_c_ptr
+
+            pure logical function c_associated_c_funptr(c_ptr_1, c_ptr_2)
+              type(__builtin_c_funptr), intent(in) :: c_ptr_1
+              type(__builtin_c_funptr), intent(in), optional :: c_ptr_2
+
+              if (c_ptr_1%__address == 0) then
+                c_associated_c_funptr = .false.
+              else if (present(c_ptr_2)) then
+                c_associated_c_funptr = c_ptr_1%__address == c_ptr_2%__address
+              else
+                c_associated_c_funptr = .true.
+              end if
+            end function c_associated_c_funptr
+          end module
+          EOF
+
             "$fc_wrapper" \
               -target "$target" \
               -isysroot "$sysroot" \
               "$minflag" \
-              -mmlir \
-              -skip-external-rtti-definition \
               -cpp \
               -fPIC \
               -O2 \
-              -c "$llvm_root/src/flang/module/__fortran_builtins.f90" \
+              -c "$build_dir/rlc_flang_module_builtins.f90" \
               -o "$build_dir/__fortran_builtins.o"
 
             "$ar" -crs "$out_dir/libflang_module_builtins.a" "$build_dir/__fortran_builtins.o"
             "$ranlib" "$out_dir/libflang_module_builtins.a"
             xcrun nm -g "$out_dir/libflang_module_builtins.a" > "$out_dir/libflang_module_builtins-nm.txt"
             grep '__QM__fortran_builtinsPc_associated_c_ptr' "$out_dir/libflang_module_builtins-nm.txt"
+            grep '__QM__fortran_builtinsPc_associated_c_funptr' "$out_dir/libflang_module_builtins-nm.txt"
+            if grep -E ' U __QM__fortran_builtinsEXdtX' "$out_dir/libflang_module_builtins-nm.txt"; then
+              echo "::error::Minimal Flang builtins shim still has unresolved type descriptors."
+              exit 1
+            fi
           }
 
           build_one_slice() {
