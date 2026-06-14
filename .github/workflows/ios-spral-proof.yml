@@ -380,6 +380,8 @@ jobs:
               -target "$target" \
               -isysroot "$sysroot" \
               "$minflag" \
+              -mmlir \
+              -skip-external-rtti-definition \
               -cpp \
               -fPIC \
               -O2 \
