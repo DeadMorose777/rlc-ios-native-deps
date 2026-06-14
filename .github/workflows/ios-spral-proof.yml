@@ -232,7 +232,9 @@ jobs:
               *) args+=("\$arg") ;;
             esac
           done
-          if [[ "\$compile_only" == 0 && -n "\${RLC_FLANG_RT_DIR:-}" ]]; then
+          if [[ "\$compile_only" == 0 && -n "\${RLC_FLANG_RT_LIB:-}" ]]; then
+            link_args+=("-Wl,-force_load,\${RLC_FLANG_RT_LIB}")
+          elif [[ "\$compile_only" == 0 && -n "\${RLC_FLANG_RT_DIR:-}" ]]; then
             link_args+=("-L\${RLC_FLANG_RT_DIR}" "-static-libflangrt")
           fi
           exec "$flang" -fintrinsic-modules-path "$flang_intrinsic_modules" "\${args[@]}" "\${link_args[@]}"
@@ -356,7 +358,7 @@ jobs:
           fortran_args = ['-target', '$target', '-isysroot', '$sysroot', '-fPIC', '-O2', '-J$build_root/spral-modules']
           c_link_args = ['-target', '$target', '-isysroot', '$sysroot', '$minflag']
           cpp_link_args = ['-target', '$target', '-isysroot', '$sysroot', '$minflag', '-stdlib=libc++']
-          fortran_link_args = ['-target', '$target', '-isysroot', '$sysroot', '-L$flang_rt_dir', '-static-libflangrt']
+          fortran_link_args = ['-target', '$target', '-isysroot', '$sysroot', '-Wl,-force_load,$flang_rt']
 
           [host_machine]
           system = 'darwin'
@@ -367,6 +369,7 @@ jobs:
 
             mkdir -p "$build_root/spral-modules"
             export RLC_FLANG_RT_DIR="$flang_rt_dir"
+            export RLC_FLANG_RT_LIB="$flang_rt"
             meson setup "$build_root/spral" "$work/src/spral" \
               --cross-file "$build_root/spral-cross.ini" \
               --prefix "$prefix" \
