@@ -299,6 +299,7 @@ jobs:
               -mmacosx-version-min=*|-miphoneos-version-min=*|-mios-simulator-version-min=*) ;;
               -Werror=implicit-function-declaration|-Wimplicit-function-declaration|-Wno-implicit-function-declaration) ;;
               -Wl,-undefined,dynamic_lookup) ;;
+              -F*|-idirafter*) ;;
               -arch) skip_next=1 ;;
               -c|-E|-S) compile_only=1; args+=("\$arg") ;;
               *) args+=("\$arg") ;;
@@ -519,6 +520,7 @@ jobs:
               -mmacosx-version-min=*|-miphoneos-version-min=*|-mios-simulator-version-min=*) ;;
               -Werror=implicit-function-declaration|-Wimplicit-function-declaration|-Wno-implicit-function-declaration) ;;
               -Wl,-undefined,dynamic_lookup) ;;
+              -F*|-idirafter*) ;;
               -arch) skip_next=1 ;;
               -c|-E|-S) compile_only=1; args+=("\$arg") ;;
               *) args+=("\$arg") ;;
