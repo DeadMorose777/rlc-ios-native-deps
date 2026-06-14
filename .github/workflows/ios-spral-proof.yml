@@ -438,7 +438,7 @@ jobs:
           needs_exe_wrapper = true
           c_args = ['-target', '$target', '-isysroot', '$sysroot', '$minflag', '-fPIC', '-O2', '-I$prefix/include']
           cpp_args = ['-target', '$target', '-isysroot', '$sysroot', '$minflag', '-fPIC', '-O2', '-stdlib=libc++', '-I$prefix/include']
-          fortran_args = ['-target', '$target', '-isysroot', '$sysroot', '-fPIC', '-O2', '-J$build_root/spral-modules']
+          fortran_args = ['-target', '$target', '-isysroot', '$sysroot', '-fPIC', '-O2']
           c_link_args = ['-target', '$target', '-isysroot', '$sysroot', '$minflag']
           cpp_link_args = ['-target', '$target', '-isysroot', '$sysroot', '$minflag', '-stdlib=libc++']
           fortran_link_args = ['-target', '$target', '-isysroot', '$sysroot', '-L$flang_rt_dir']
