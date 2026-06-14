@@ -207,7 +207,6 @@ jobs:
             local sdk="$2"
             local target="$3"
             local minflag="$4"
-            local host="$5"
 
             local sysroot
             local build_root
