@@ -372,60 +372,59 @@ jobs:
             local out_dir="$work/artifacts/flang-modules/${name}/lib"
             local build_dir="$work/build/${name}/flang-module-builtins"
             local sysroot
+            local cc
 
             sysroot="$(xcrun --sdk "$sdk" --show-sdk-path)"
+            cc="$(xcrun --sdk "$sdk" --find clang)"
             mkdir -p "$out_dir" "$build_dir"
 
-            cat > "$build_dir/rlc_flang_module_builtins.f90" <<'EOF'
-          module __fortran_builtins
-            intrinsic :: selected_int_kind
-            integer, parameter :: int64 = selected_int_kind(18)
+            cat > "$build_dir/rlc_flang_module_builtins.c" <<'EOF'
+          #include <stdint.h>
 
-            type, bind(c), public :: __builtin_c_ptr
-              integer(kind=int64), private :: __address
-            end type
+          typedef struct {
+            int64_t address;
+          } rlc_flang_c_ptr;
 
-            type, bind(c), public :: __builtin_c_funptr
-              integer(kind=int64), private :: __address
-            end type
+          static int32_t rlc_associated_address(
+              const rlc_flang_c_ptr *first,
+              const rlc_flang_c_ptr *second) {
+            if (first == 0 || first->address == 0) {
+              return 0;
+            }
+            if (second != 0) {
+              return first->address == second->address;
+            }
+            return 1;
+          }
 
-          contains
-            pure logical function c_associated_c_ptr(c_ptr_1, c_ptr_2)
-              type(__builtin_c_ptr), intent(in) :: c_ptr_1
-              type(__builtin_c_ptr), intent(in), optional :: c_ptr_2
+          int32_t rlc_flang_c_associated_c_ptr(
+              const rlc_flang_c_ptr *first,
+              const rlc_flang_c_ptr *second)
+              __asm("__QM__fortran_builtinsPc_associated_c_ptr");
+          int32_t rlc_flang_c_associated_c_ptr(
+              const rlc_flang_c_ptr *first,
+              const rlc_flang_c_ptr *second) {
+            return rlc_associated_address(first, second);
+          }
 
-              if (c_ptr_1%__address == 0) then
-                c_associated_c_ptr = .false.
-              else if (present(c_ptr_2)) then
-                c_associated_c_ptr = c_ptr_1%__address == c_ptr_2%__address
-              else
-                c_associated_c_ptr = .true.
-              end if
-            end function c_associated_c_ptr
-
-            pure logical function c_associated_c_funptr(c_ptr_1, c_ptr_2)
-              type(__builtin_c_funptr), intent(in) :: c_ptr_1
-              type(__builtin_c_funptr), intent(in), optional :: c_ptr_2
-
-              if (c_ptr_1%__address == 0) then
-                c_associated_c_funptr = .false.
-              else if (present(c_ptr_2)) then
-                c_associated_c_funptr = c_ptr_1%__address == c_ptr_2%__address
-              else
-                c_associated_c_funptr = .true.
-              end if
-            end function c_associated_c_funptr
-          end module
+          int32_t rlc_flang_c_associated_c_funptr(
+              const rlc_flang_c_ptr *first,
+              const rlc_flang_c_ptr *second)
+              __asm("__QM__fortran_builtinsPc_associated_c_funptr");
+          int32_t rlc_flang_c_associated_c_funptr(
+              const rlc_flang_c_ptr *first,
+              const rlc_flang_c_ptr *second) {
+            return rlc_associated_address(first, second);
+          }
           EOF
 
-            "$fc_wrapper" \
+            "$cc" \
               -target "$target" \
               -isysroot "$sysroot" \
               "$minflag" \
-              -cpp \
               -fPIC \
               -O2 \
-              -c "$build_dir/rlc_flang_module_builtins.f90" \
+              -c "$build_dir/rlc_flang_module_builtins.c" \
               -o "$build_dir/__fortran_builtins.o"
 
             "$ar" -crs "$out_dir/libflang_module_builtins.a" "$build_dir/__fortran_builtins.o"
@@ -433,8 +432,8 @@ jobs:
             xcrun nm -g "$out_dir/libflang_module_builtins.a" > "$out_dir/libflang_module_builtins-nm.txt"
             grep '__QM__fortran_builtinsPc_associated_c_ptr' "$out_dir/libflang_module_builtins-nm.txt"
             grep '__QM__fortran_builtinsPc_associated_c_funptr' "$out_dir/libflang_module_builtins-nm.txt"
-            if grep -E ' U __QM__fortran_builtinsEXdtX' "$out_dir/libflang_module_builtins-nm.txt"; then
-              echo "::error::Minimal Flang builtins shim still has unresolved type descriptors."
+            if grep -E '^[[:space:]]+U ' "$out_dir/libflang_module_builtins-nm.txt"; then
+              echo "::error::Flang builtins C shim has unresolved symbols."
               exit 1
             fi
           }
