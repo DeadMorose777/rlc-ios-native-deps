@@ -1007,11 +1007,39 @@ jobs:
           package_one_slice "ios-arm64" "iphoneos" "arm64-apple-ios${IPHONEOS_DEPLOYMENT_TARGET}" "-miphoneos-version-min=${IPHONEOS_DEPLOYMENT_TARGET}"
           package_one_slice "ios-arm64-simulator" "iphonesimulator" "arm64-apple-ios${IPHONEOS_DEPLOYMENT_TARGET}-simulator" "-mios-simulator-version-min=${IPHONEOS_DEPLOYMENT_TARGET}"
 
+          copy_first_existing() {
+            local destination="$1"
+            shift
+            local source
+
+            for source in "$@"; do
+              if [[ -f "$source" ]]; then
+                cp "$source" "$destination"
+                return
+              fi
+            done
+
+            echo "::error::None of the expected license files exist for $destination"
+            printf '  %s\n' "$@"
+            exit 1
+          }
+
           mkdir -p "$native_deps/LICENSES"
-          cp "$work/src/spral/LICENCE" "$native_deps/LICENSES/SPRAL-LICENCE"
-          cp "$work/src/metis/LICENSE.txt" "$native_deps/LICENSES/METIS-LICENSE.txt"
-          cp "$work/src/metis/GKlib/LICENSE.txt" "$native_deps/LICENSES/GKLIB-LICENSE.txt"
-          cp "$llvm_root/src/llvm/LICENSE.TXT" "$native_deps/LICENSES/LLVM-LICENSE.txt"
+          copy_first_existing "$native_deps/LICENSES/SPRAL-LICENCE" \
+            "$work/src/spral/LICENCE" \
+            "$work/src/spral/LICENSE" \
+            "$work/src/spral/LICENSE.txt"
+          copy_first_existing "$native_deps/LICENSES/METIS-LICENSE.txt" \
+            "$work/src/metis/LICENSE" \
+            "$work/src/metis/LICENSE.txt" \
+            "$work/src/metis/License.txt"
+          copy_first_existing "$native_deps/LICENSES/GKLIB-LICENSE.txt" \
+            "$work/src/metis/GKlib/LICENSE" \
+            "$work/src/metis/GKlib/LICENSE.txt" \
+            "$work/src/metis/GKlib/License.txt"
+          copy_first_existing "$native_deps/LICENSES/LLVM-LICENSE.txt" \
+            "$llvm_root/src/llvm/LICENSE.TXT" \
+            "$llvm_root/src/LICENSE.TXT"
           cat > "$native_deps/manifest.json" <<EOF
           {
             "schema_version": "rlc_ios_native_deps_bundle.v1",
