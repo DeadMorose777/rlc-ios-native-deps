@@ -631,6 +631,18 @@ jobs:
             echo "$runtime"
           }
 
+          find_flang_module_builtins() {
+            local name="$1"
+            local runtime
+            runtime="$work/artifacts/flang-modules/${name}/lib/libflang_module_builtins.a"
+            if [[ ! -f "$runtime" ]]; then
+              echo "::error::libflang_module_builtins.a not found for $name."
+              find "$work/artifacts/flang-modules" -type f -print || true
+              exit 1
+            fi
+            echo "$runtime"
+          }
+
           flatten_archive_no_nested() {
             local input="$1"
             local output="$2"
